@@ -1,0 +1,14 @@
+<RCC>
+  <qresource prefix="/vadocast-multistream">
+    <file>media/stream.svg</file>
+    <file>media/streaming.svg</file>
+	<file>media/facebook.png</file>
+	<file>media/tiktok.png</file>
+	<file>media/trovo.png</file>
+	<file>media/twitch.png</file>
+	<file>media/twitter.png</file>
+	<file>media/unknown.png</file>
+	<file>media/youtube.png</file>
+	<file>media/kick.png</file>
+  </qresource>
+</RCC>

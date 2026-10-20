@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- vadocast logo: one horizontal (16:9) and one vertical (9:16) canvas, live dot -->
+  <rect x="8" y="8" width="240" height="240" rx="52" fill="#E50914"/>
+  <rect x="36" y="98" width="152" height="80" rx="10" fill="none" stroke="#FFFFFF" stroke-width="12"/>
+  <rect x="146" y="56" width="76" height="140" rx="12" fill="#FFFFFF"/>
+  <rect x="156" y="66" width="56" height="120" rx="5" fill="#0B0B0B"/>
+  <circle cx="184" cy="126" r="15" fill="#E50914"/>
+</svg>

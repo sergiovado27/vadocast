@@ -1,0 +1,10 @@
+vadocast-multistream
+
+This built-in vadocast module is derived from Aitum's "obs-aitum-multistream"
+plugin (version 1.0.9), licensed under the GNU General Public License v2.0:
+https://github.com/Aitum/obs-aitum-multistream
+
+Original copyright notices are kept in the source files and the full license
+text is in the LICENSE file in this directory. Modifications for vadocast
+(built-in module, removed update checks and third-party branding, restricted
+resolutions, vadocast theming) are distributed under the same license.

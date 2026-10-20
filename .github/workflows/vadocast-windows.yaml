@@ -1,0 +1,39 @@
+name: vadocast Windows build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-x64:
+    name: Windows x64
+    runs-on: windows-2025-vs2026
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: recursive
+
+      - name: Build vadocast
+        # Reuses OBS' build script: installs dependencies (obs-deps, Qt, CEF) and
+        # configures with the windows-ci-x64 preset.
+        run: .github/scripts/Build-Windows.ps1 -Target x64 -Configuration RelWithDebInfo
+
+      - name: Package
+        run: |
+          $Install = "${{ github.workspace }}/build_x64/install"
+          Compress-Archive -Path "$Install/*" -DestinationPath "${{ github.workspace }}/vadocast-windows-x64.zip"
+
+      - name: Upload vadocast
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vadocast-windows-x64-${{ github.sha }}
+          path: ${{ github.workspace }}/vadocast-windows-x64.zip

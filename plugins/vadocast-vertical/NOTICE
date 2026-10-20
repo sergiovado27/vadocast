@@ -1,0 +1,10 @@
+vadocast-vertical
+
+This built-in vadocast module is derived from Aitum's "obs-vertical-canvas"
+plugin (version 1.6.6), licensed under the GNU General Public License v2.0:
+https://github.com/Aitum/obs-vertical-canvas
+
+Original copyright notices are kept in the source files and the full license
+text is in the LICENSE file in this directory. Modifications for vadocast
+(built-in module, removed update checks and third-party branding, restricted
+vertical resolutions, vadocast theming) are distributed under the same license.
