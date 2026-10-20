@@ -16,6 +16,9 @@ target_sources(
     config-dialog.hpp
     config-utils.cpp
     config-utils.hpp
+    golive-dialog.cpp
+    golive-dialog.hpp
+    golive.cpp
     multistream.cpp
     multistream.hpp
     obs-websocket-api.h

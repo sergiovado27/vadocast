@@ -1,6 +1,10 @@
 #include "vertical-canvas.hpp"
 
+#include <algorithm>
+#include <cmath>
+#include <functional>
 #include <list>
+#include <vector>
 
 
 #include <obs-frontend-api.h>
@@ -15,6 +19,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPushButton>
+#include <QThread>
 #include <QTimer>
 #include <QToolBar>
 #include <QWidgetAction>
@@ -153,6 +158,9 @@ void frontend_event(obs_frontend_event event, void *private_data)
 		for (const auto &it : canvas_docks) {
 			it->LoadScenes();
 			it->LogScenes();
+			// vadocast: first run auto generation of the vertical scenes (once per scene collection).
+			// Delayed a little so devices such as webcams report their size before the layout is computed.
+			QTimer::singleShot(2000, it, [it] { it->CheckAutoGenerate(); });
 		}
 	} else if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING) {
 		struct obs_frontend_source_list transitions = {};
@@ -166,6 +174,14 @@ void frontend_event(obs_frontend_event event, void *private_data)
 			it->LoadScenes();
 			it->LogScenes();
 			it->FinishLoading();
+			// vadocast: first run auto generation of the vertical scenes (once per scene collection).
+			// Delayed a little so devices such as webcams report their size before the layout is computed.
+			QTimer::singleShot(2000, it, [it] { it->CheckAutoGenerate(); });
+		}
+	} else if (event == OBS_FRONTEND_EVENT_SCENE_LIST_CHANGED) {
+		// vadocast: generate the vertical version of new main scenes (only in automatic mode)
+		for (const auto &it : canvas_docks) {
+			QTimer::singleShot(0, it, [it] { it->CheckAutoGenerate(); });
 		}
 	} else if (event == OBS_FRONTEND_EVENT_SCENE_CHANGED) {
 		for (const auto &it : canvas_docks) {
@@ -366,6 +382,83 @@ static void switch_scene(void *data, calldata_t *cd)
 		}
 		QMetaObject::invokeMethod(it, "SwitchScene", Q_ARG(QString, scene));
 	}
+}
+
+/* vadocast: the handlers below work on the (single) vertical canvas, so they do
+ * not take the width/height filters of the handlers above. Work that touches
+ * scenes, outputs or widgets runs on the dock's (UI) thread: directly when the
+ * caller is already on it, otherwise through a blocking queued call. */
+static void run_on_dock_thread(CanvasDock *dock, const std::function<void()> &work)
+{
+	if (QThread::currentThread() == dock->thread()) {
+		work();
+		return;
+	}
+	QMetaObject::invokeMethod(dock, [&work] { work(); }, Qt::BlockingQueuedConnection);
+}
+
+static void generate_from_main(void *data, calldata_t *cd)
+{
+	UNUSED_PARAMETER(data);
+	const bool overwrite = calldata_bool(cd, "overwrite");
+	int result = -1;
+	if (!canvas_docks.empty()) {
+		CanvasDock *dock = canvas_docks.front();
+		run_on_dock_thread(dock, [dock, overwrite, &result] { result = dock->RunGenerateFromMain(overwrite); });
+	}
+	calldata_set_bool(cd, "success", result >= 0);
+	calldata_set_int(cd, "created", result > 0 ? result : 0);
+}
+
+static void get_resolution(void *data, calldata_t *cd)
+{
+	UNUSED_PARAMETER(data);
+	long long width = 0;
+	long long height = 0;
+	if (!canvas_docks.empty()) {
+		width = canvas_docks.front()->GetCanvasWidth();
+		height = canvas_docks.front()->GetCanvasHeight();
+	}
+	calldata_set_int(cd, "width", width);
+	calldata_set_int(cd, "height", height);
+}
+
+static void set_resolution(void *data, calldata_t *cd)
+{
+	UNUSED_PARAMETER(data);
+	const long long width = calldata_int(cd, "width");
+	const long long height = calldata_int(cd, "height");
+	bool success = false;
+	if (!canvas_docks.empty() && width > 0 && height > 0 &&
+	    vadocast_vertical_allowed((uint32_t)width, (uint32_t)height)) {
+		CanvasDock *dock = canvas_docks.front();
+		run_on_dock_thread(dock, [dock, width, height, &success] {
+			if (dock->AnyOutputActive()) {
+				blog(LOG_WARNING, "[Vertical] resolution not changed: a vertical output is active");
+				return;
+			}
+			success = dock->ApplyResolution((uint32_t)width, (uint32_t)height);
+			if (success) {
+				save_canvas();
+			}
+		});
+	} else {
+		blog(LOG_WARNING, "[Vertical] resolution %lldx%lld is not allowed", width, height);
+	}
+	calldata_set_bool(cd, "success", success);
+}
+
+static void stream_active(void *data, calldata_t *cd)
+{
+	UNUSED_PARAMETER(data);
+	bool active = false;
+	for (const auto &it : canvas_docks) {
+		if (it->StreamingActiveOrStarting()) {
+			active = true;
+			break;
+		}
+	}
+	calldata_set_bool(cd, "active", active);
 }
 
 obs_websocket_vendor vendor = nullptr;
@@ -639,6 +732,12 @@ bool obs_module_load(void)
 	proc_handler_add(ph, "void vadocast_vertical_get_scene(in int width, in int height, out string scene)", get_scene, nullptr);
 	proc_handler_add(ph, "void vadocast_vertical_switch_scene(in int width, in int height, in string scene)", switch_scene,
 			 nullptr);
+	proc_handler_add(ph, "void vadocast_vertical_generate_from_main(in bool overwrite, out bool success, out int created)",
+			 generate_from_main, nullptr);
+	proc_handler_add(ph, "void vadocast_vertical_get_resolution(out int width, out int height)", get_resolution, nullptr);
+	proc_handler_add(ph, "void vadocast_vertical_set_resolution(in int width, in int height, out bool success)",
+			 set_resolution, nullptr);
+	proc_handler_add(ph, "void vadocast_vertical_stream_active(out bool active)", stream_active, nullptr);
 
 	return true;
 }
@@ -1254,6 +1353,11 @@ CanvasDock::CanvasDock(obs_data_t *settings, QWidget *parent)
 	streamButtonGroup->layout()->addWidget(streamButtonMulti);
 
 	buttonRow->addWidget(streamButtonGroup);
+	/* vadocast: vertical streaming is started/stopped from the unified "Go live" panel, so the
+	 * dock's own stream buttons are hidden. They are kept (hidden) because the websocket requests,
+	 * hotkeys and the multistream module still use them and their code paths. */
+	streamButton->setVisible(false);
+	streamButtonGroup->setVisible(false);
 
 	recordButton = new QPushButton;
 	recordButton->setMinimumHeight(30);
@@ -6522,11 +6626,13 @@ void CanvasDock::StartStreamOutput(std::vector<StreamServer>::iterator it)
 		}
 	}
 	it->stopping = false;
+	it->starting = true;
 	if (!obs_output_start(it->output)) {
 		if (started_video) {
 			DestroyVideo();
 		}
 		it->stopping = true;
+		it->starting = false;
 		QMetaObject::invokeMethod(this, "OnStreamStop", Q_ARG(int, OBS_OUTPUT_ERROR),
 					  Q_ARG(QString, QString::fromUtf8(obs_output_get_last_error(it->output))),
 					  Q_ARG(QString, QString::fromUtf8(it->stream_server)),
@@ -6899,10 +7005,12 @@ void CanvasDock::StartStream()
 			obs_output_update(it->output, output_settings);
 		}
 		it->stopping = false;
+		it->starting = true;
 		if (obs_output_start(it->output)) {
 			success = true;
 		} else {
 			it->stopping = true;
+			it->starting = false;
 			QMetaObject::invokeMethod(this, "OnStreamStop", Q_ARG(int, OBS_OUTPUT_ERROR),
 						  Q_ARG(QString, QString::fromUtf8(obs_output_get_last_error(it->output))),
 						  Q_ARG(QString, QString::fromUtf8(it->stream_server)),
@@ -6958,6 +7066,7 @@ void CanvasDock::stream_output_stop(void *data, calldata_t *calldata)
 			stream_server = QString::fromUtf8(it->stream_server);
 			stream_key = QString::fromUtf8(it->stream_key);
 			it->stopping = true;
+			it->starting = false;
 		}
 	}
 
@@ -7170,6 +7279,8 @@ obs_data_t *CanvasDock::SaveSettings()
 void CanvasDock::ClearScenes()
 {
 	clearing = true;
+	// vadocast: the next scene collection loads its own state (see save_load)
+	autoGenerateState = VADOCAST_AUTO_GEN_UNDECIDED;
 	if (scenesCombo) {
 		scenesCombo->clear();
 	}
@@ -7579,6 +7690,14 @@ void CanvasDock::source_rename(void *data, calldata_t *calldata)
 	const auto new_name = QString::fromUtf8(calldata_string(calldata, "new_name"));
 	auto source = (obs_source_t *)calldata_ptr(calldata, "source");
 	if (!source || !obs_source_is_scene(source)) {
+		return;
+	}
+	/* vadocast: only renames of this canvas' scenes matter here. Generated vertical scenes
+	 * share their names with the main scenes, so renaming a main scene must not rename
+	 * links or list entries of the vertical canvas. */
+	const auto source_canvas = obs_source_get_canvas(source);
+	obs_canvas_release(source_canvas);
+	if (!source_canvas || source_canvas != d->canvas) {
 		return;
 	}
 
@@ -8028,6 +8147,11 @@ void CanvasDock::OnReplayBufferStop(int code, QString last_error)
 
 void CanvasDock::MainSceneChanged()
 {
+	// vadocast: in automatic mode, give new main scenes their vertical version before switching
+	if (autoGenerateState == VADOCAST_AUTO_GEN_ON && !autoGenerating && canvas && !clearing && !switching) {
+		GenerateFromMain(false, true);
+	}
+
 	auto current_scene = obs_frontend_get_current_scene();
 	if (!current_scene) {
 		if (linkedButton) {
@@ -8944,8 +9068,16 @@ void CanvasDock::DisableStreamSettings()
 
 void CanvasDock::save_load(obs_data_t *save_data, bool saving, void *param)
 {
-	UNUSED_PARAMETER(save_data);
 	CanvasDock *window = static_cast<CanvasDock *>(param);
+	/* vadocast: the auto generation state belongs to the scene collection (that is where the
+	 * vertical scenes and their links live), so it is stored in the collection's module data. */
+	if (!saving) {
+		window->autoGenerateState = (int)obs_data_get_int(save_data, "vadocast_vertical_auto_generate");
+		return;
+	}
+	if (save_data) {
+		obs_data_set_int(save_data, "vadocast_vertical_auto_generate", window->autoGenerateState);
+	}
 	if (saving) {
 		if (window->scenesDock) {
 			auto c = window->scenesDock->sceneList->count();
@@ -9171,4 +9303,633 @@ void AspectRatioPixmapLabel::resizeEvent(QResizeEvent *e)
 	if (!pix.isNull()) {
 		QLabel::setPixmap(scaledPixmap());
 	}
+}
+
+/* ------------------------------------------------------------------------- */
+/* vadocast: outputs state and resolution changes                            */
+
+bool CanvasDock::StreamingActiveOrStarting()
+{
+	for (auto it = streamOutputs.begin(); it != streamOutputs.end(); ++it) {
+		if (!it->output) {
+			continue;
+		}
+		if (obs_output_active(it->output) || it->starting) {
+			return true;
+		}
+	}
+	return false;
+}
+
+bool CanvasDock::AnyOutputActive()
+{
+	return StreamingActiveOrStarting() || obs_output_active(recordOutput) || obs_output_active(replayOutput) ||
+	       obs_output_active(virtualCamOutput);
+}
+
+void CanvasDock::MigrateLinkedScenes(uint32_t old_width, uint32_t old_height)
+{
+	/* Links are stored per canvas size in the main scenes; keep them when the size changes. */
+	struct obs_frontend_source_list scenes = {};
+	obs_frontend_get_scenes(&scenes);
+	for (size_t i = 0; i < scenes.sources.num; i++) {
+		obs_source_t *src = scenes.sources.array[i];
+		obs_data_t *ss = obs_source_get_settings(src);
+		obs_data_array_t *c = obs_data_get_array(ss, "canvas");
+		obs_data_release(ss);
+		const size_t count = obs_data_array_count(c);
+		obs_data_t *old_entry = nullptr;
+		bool has_new = false;
+		for (size_t j = 0; j < count; j++) {
+			obs_data_t *item = obs_data_array_item(c, j);
+			if (!item) {
+				continue;
+			}
+			const long long w = obs_data_get_int(item, "width");
+			const long long h = obs_data_get_int(item, "height");
+			if (w == (long long)canvas_width && h == (long long)canvas_height) {
+				has_new = true;
+			} else if (!old_entry && w == (long long)old_width && h == (long long)old_height) {
+				old_entry = item;
+				continue;
+			}
+			obs_data_release(item);
+		}
+		if (old_entry && !has_new) {
+			obs_data_set_int(old_entry, "width", canvas_width);
+			obs_data_set_int(old_entry, "height", canvas_height);
+		}
+		obs_data_release(old_entry);
+		obs_data_array_release(c);
+	}
+	obs_frontend_source_list_free(&scenes);
+}
+
+bool CanvasDock::ApplyResolution(uint32_t width, uint32_t height)
+{
+	vadocast_clamp_vertical_resolution(width, height);
+	if (width == canvas_width && height == canvas_height) {
+		return true;
+	}
+	if (obs_output_active(replayOutput)) {
+		obs_output_stop(replayOutput);
+	}
+
+	blog(LOG_INFO, "[Vertical] resolution changed from %ux%u to %ux%u", canvas_width, canvas_height, width, height);
+
+	const uint32_t old_width = canvas_width;
+	const uint32_t old_height = canvas_height;
+	canvas_width = width;
+	canvas_height = height;
+	MigrateLinkedScenes(old_width, old_height);
+
+	if (!canvas) {
+		/* Not loaded yet (e.g. while switching scene collections): StartVideo uses the new size. */
+		return true;
+	}
+
+	obs_video_info ovi;
+	obs_get_video_info(&ovi);
+	ovi.base_width = width;
+	ovi.base_height = height;
+	ovi.output_width = width;
+	ovi.output_height = height;
+	obs_canvas_reset_video(canvas, &ovi);
+
+	auto t = obs_weak_source_get_source(source);
+	if (obs_source_get_type(t) == OBS_SOURCE_TYPE_TRANSITION) {
+		obs_transition_set_size(t, width, height);
+	}
+	obs_source_release(t);
+
+	LoadScenes();
+	ProfileChanged();
+	return true;
+}
+
+/* ------------------------------------------------------------------------- */
+/* vadocast: automatic vertical version of the main canvas scenes            */
+
+struct vadocast_item_box {
+	float x0;
+	float y0;
+	float x1;
+	float y1;
+};
+
+static bool vadocast_collect_items(obs_scene_t *, obs_sceneitem_t *item, void *param)
+{
+	auto items = static_cast<std::vector<obs_sceneitem_t *> *>(param);
+	obs_sceneitem_addref(item);
+	items->push_back(item);
+	return true;
+}
+
+static bool vadocast_count_items_cb(obs_scene_t *, obs_sceneitem_t *, void *param)
+{
+	(*static_cast<size_t *>(param))++;
+	return true;
+}
+
+static size_t vadocast_count_items(obs_scene_t *scene)
+{
+	size_t count = 0;
+	obs_scene_enum_items(scene, vadocast_count_items_cb, &count);
+	return count;
+}
+
+static void vadocast_clear_scene(obs_scene_t *scene)
+{
+	std::vector<obs_sceneitem_t *> items;
+	obs_scene_enum_items(scene, vadocast_collect_items, &items);
+	for (auto item : items) {
+		obs_sceneitem_remove(item);
+		obs_sceneitem_release(item);
+	}
+}
+
+static bool vadocast_main_has_items()
+{
+	bool has_items = false;
+	struct obs_frontend_source_list scenes = {};
+	obs_frontend_get_scenes(&scenes);
+	for (size_t i = 0; i < scenes.sources.num && !has_items; i++) {
+		obs_scene_t *scene = obs_scene_from_source(scenes.sources.array[i]);
+		if (scene && vadocast_count_items(scene) > 0) {
+			has_items = true;
+		}
+	}
+	obs_frontend_source_list_free(&scenes);
+	return has_items;
+}
+
+static bool vadocast_is_screen_capture(obs_source_t *source)
+{
+	const char *id = obs_source_get_unversioned_id(source);
+	if (!id) {
+		return false;
+	}
+	static const char *const capture_ids[] = {"monitor_capture",
+						  "game_capture",
+						  "window_capture",
+						  "display_capture",
+						  "screen_capture",
+						  "xshm_input",
+						  "xcomposite_input",
+						  "pipewire-desktop-capture-source",
+						  "pipewire-screen-capture-source",
+						  "pipewire-window-capture-source"};
+	for (const char *capture_id : capture_ids) {
+		if (strcmp(id, capture_id) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/* Bounding box of an item on the main canvas (children of a group go through the group transform). */
+static vadocast_item_box vadocast_get_item_box(obs_sceneitem_t *item, obs_sceneitem_t *group)
+{
+	matrix4 boxTransform;
+	obs_sceneitem_get_box_transform(item, &boxTransform);
+	if (group) {
+		matrix4 groupTransform;
+		obs_sceneitem_get_draw_transform(group, &groupTransform);
+		matrix4_mul(&boxTransform, &boxTransform, &groupTransform);
+	}
+
+	vadocast_item_box box = {0.0f, 0.0f, 0.0f, 0.0f};
+	const float corners[4][2] = {{0.0f, 0.0f}, {1.0f, 0.0f}, {0.0f, 1.0f}, {1.0f, 1.0f}};
+	for (int i = 0; i < 4; i++) {
+		vec3 pos;
+		vec3_set(&pos, corners[i][0], corners[i][1], 0.0f);
+		vec3_transform(&pos, &pos, &boxTransform);
+		if (!std::isfinite(pos.x) || !std::isfinite(pos.y)) {
+			vadocast_item_box empty = {0.0f, 0.0f, 0.0f, 0.0f};
+			return empty;
+		}
+		if (i == 0) {
+			box.x0 = pos.x;
+			box.x1 = pos.x;
+			box.y0 = pos.y;
+			box.y1 = pos.y;
+		} else {
+			box.x0 = std::min(box.x0, pos.x);
+			box.y0 = std::min(box.y0, pos.y);
+			box.x1 = std::max(box.x1, pos.x);
+			box.y1 = std::max(box.y1, pos.y);
+		}
+	}
+	return box;
+}
+
+/* Start of a box of `size` so that it stays inside [0, limit] (centered when it can't fit). */
+static float vadocast_clamp_start(float start, float size, float limit)
+{
+	if (size >= limit) {
+		return (limit - size) * 0.5f;
+	}
+	return std::min(std::max(start, 0.0f), limit - size);
+}
+
+/* Adds the same source of a main scene item to the vertical scene and lays it out for 9:16. */
+static void vadocast_copy_item(obs_scene_t *target, obs_sceneitem_t *item, obs_sceneitem_t *group, float mw, float mh,
+			       float vw, float vh)
+{
+	obs_source_t *src = obs_sceneitem_get_source(item);
+	if (!src) {
+		return;
+	}
+	obs_sceneitem_t *new_item = obs_scene_add(target, src);
+	if (!new_item) {
+		blog(LOG_WARNING, "[Vertical] could not add '%s' to the generated vertical scene", obs_source_get_name(src));
+		return;
+	}
+
+	const vadocast_item_box box = vadocast_get_item_box(item, group);
+	const float bw = box.x1 - box.x0;
+	const float bh = box.y1 - box.y0;
+
+	/* Part of the item that is inside the main canvas */
+	const float vx0 = std::max(box.x0, 0.0f);
+	const float vy0 = std::max(box.y0, 0.0f);
+	const float vx1 = std::min(box.x1, mw);
+	const float vy1 = std::min(box.y1, mh);
+	const float visible_area = (vx1 > vx0 && vy1 > vy0) ? (vx1 - vx0) * (vy1 - vy0) : 0.0f;
+	const float canvas_area = mw * mh;
+	bool background = visible_area >= 0.8f * canvas_area;
+	if (!background && vadocast_is_screen_capture(src) && visible_area >= 0.25f * canvas_area) {
+		/* Screen/game/window captures that are not small are treated as the background too */
+		background = true;
+	}
+
+	const float group_rot = group ? obs_sceneitem_get_rot(group) : 0.0f;
+	struct obs_transform_info info = {};
+	if (background) {
+		/* Fill the whole vertical canvas, cropped (scale to outer bounds), not stretched */
+		const float rot = obs_sceneitem_get_rot(item) + group_rot;
+		vec2_set(&info.pos, vw * 0.5f, vh * 0.5f);
+		/* Only keep upside-down rotations; 90 degree rotations would not fill the bounds */
+		info.rot = std::fmod(std::fabs(rot), 180.0f) < 0.01f ? rot : 0.0f;
+		vec2_set(&info.scale, 1.0f, 1.0f);
+		info.alignment = OBS_ALIGN_CENTER;
+		info.bounds_type = OBS_BOUNDS_SCALE_OUTER;
+		info.bounds_alignment = OBS_ALIGN_CENTER;
+		vec2_set(&info.bounds, vw, vh);
+		info.crop_to_bounds = true;
+	} else {
+		/* Same proportion of the canvas width, same relative position, kept inside the canvas */
+		const float s = vw / mw;
+		obs_sceneitem_get_info2(item, &info);
+
+		vec3 anchor;
+		vec3_set(&anchor, info.pos.x, info.pos.y, 0.0f);
+		if (group) {
+			matrix4 groupTransform;
+			obs_sceneitem_get_draw_transform(group, &groupTransform);
+			vec3_transform(&anchor, &anchor, &groupTransform);
+
+			vec2 group_scale;
+			obs_sceneitem_get_scale(group, &group_scale);
+			info.scale.x *= group_scale.x;
+			info.scale.y *= group_scale.y;
+			info.bounds.x *= group_scale.x;
+			info.bounds.y *= group_scale.y;
+			info.rot += group_rot;
+		}
+
+		const float nw = bw * s;
+		const float nh = bh * s;
+		const float nx0 = vadocast_clamp_start((box.x0 + bw * 0.5f) / mw * vw - nw * 0.5f, nw, vw);
+		const float ny0 = vadocast_clamp_start((box.y0 + bh * 0.5f) / mh * vh - nh * 0.5f, nh, vh);
+
+		/* The anchor keeps its offset to the bounding box, scaled like the item */
+		info.pos.x = nx0 + (anchor.x - box.x0) * s;
+		info.pos.y = ny0 + (anchor.y - box.y0) * s;
+		info.scale.x *= s;
+		info.scale.y *= s;
+		info.bounds.x *= s;
+		info.bounds.y *= s;
+	}
+	obs_sceneitem_set_info2(new_item, &info);
+
+	struct obs_sceneitem_crop crop = {};
+	obs_sceneitem_get_crop(item, &crop);
+	obs_sceneitem_set_crop(new_item, &crop);
+	obs_sceneitem_set_scale_filter(new_item, obs_sceneitem_get_scale_filter(item));
+	obs_sceneitem_set_blending_method(new_item, obs_sceneitem_get_blending_method(item));
+	obs_sceneitem_set_blending_mode(new_item, obs_sceneitem_get_blending_mode(item));
+
+	const bool visible = obs_sceneitem_visible(item) && (!group || obs_sceneitem_visible(group));
+	obs_sceneitem_set_visible(new_item, visible);
+}
+
+QString CanvasDock::GetLinkedSceneName(obs_source_t *mainScene, bool *hasEntry)
+{
+	QString linked;
+	if (hasEntry) {
+		*hasEntry = false;
+	}
+	obs_data_t *ss = obs_source_get_settings(mainScene);
+	obs_data_array_t *c = obs_data_get_array(ss, "canvas");
+	obs_data_release(ss);
+	const size_t count = obs_data_array_count(c);
+	for (size_t i = 0; i < count; i++) {
+		obs_data_t *item = obs_data_array_item(c, i);
+		if (!item) {
+			continue;
+		}
+		if (obs_data_get_int(item, "width") == (long long)canvas_width &&
+		    obs_data_get_int(item, "height") == (long long)canvas_height) {
+			if (hasEntry) {
+				*hasEntry = true;
+			}
+			linked = QString::fromUtf8(obs_data_get_string(item, "scene"));
+			obs_data_release(item);
+			break;
+		}
+		obs_data_release(item);
+	}
+	obs_data_array_release(c);
+	return linked;
+}
+
+std::string CanvasDock::UniqueVerticalSceneName(const char *base)
+{
+	const std::string base_name = (base && *base) ? std::string(base) : std::string(obs_module_text("VerticalScene"));
+	auto taken = [this](const std::string &n) -> bool {
+		obs_source_t *s = obs_canvas_get_source_by_name(canvas, n.c_str());
+		if (!s) {
+			return false;
+		}
+		obs_source_release(s);
+		return true;
+	};
+	if (!taken(base_name)) {
+		return base_name;
+	}
+	const std::string suffix = obs_module_text("GeneratedSceneSuffix");
+	std::string name = base_name + " (" + suffix + ")";
+	int i = 2;
+	while (taken(name)) {
+		name = base_name + " (" + suffix + " " + std::to_string(i) + ")";
+		i++;
+	}
+	return name;
+}
+
+obs_scene_t *CanvasDock::CreateVerticalScene(const std::string &name)
+{
+	obs_scene_t *new_scene = obs_canvas_scene_create(canvas, name.c_str());
+	if (!new_scene) {
+		return nullptr;
+	}
+	obs_source_t *new_source = obs_scene_get_source(new_scene);
+
+	/* Same setup as AddScene */
+	std::string ssn = obs_canvas_get_name(canvas);
+	ssn += " ";
+	ssn += obs_frontend_get_locale_string("Basic.Hotkeys.SelectScene");
+	obs_hotkey_register_source(
+		new_source, "OBSBasic.SelectScene", ssn.c_str(),
+		[](void *data, obs_hotkey_id, obs_hotkey_t *key, bool pressed) {
+			if (!pressed) {
+				return;
+			}
+			auto p = (CanvasDock *)data;
+			auto potential_source = (obs_weak_source_t *)obs_hotkey_get_registerer(key);
+			OBSSourceAutoRelease hotkey_source = obs_weak_source_get_source(potential_source);
+			if (hotkey_source) {
+				auto sn = QString::fromUtf8(obs_source_get_name(hotkey_source));
+				QMetaObject::invokeMethod(p, "SwitchScene", Q_ARG(QString, sn), Q_ARG(bool, true));
+			}
+		},
+		this);
+
+	auto sh = obs_source_get_signal_handler(new_source);
+	signal_handler_connect(sh, "rename", source_rename, this);
+	auto sn = QString::fromUtf8(obs_source_get_name(new_source));
+	if (scenesCombo) {
+		scenesCombo->addItem(sn);
+	}
+	if (scenesDock) {
+		scenesDock->sceneList->addItem(sn);
+	}
+	return new_scene;
+}
+
+int CanvasDock::GenerateFromMain(bool overwrite, bool onlyNew)
+{
+	if (!canvas || clearing || switching || autoGenerating) {
+		return -1;
+	}
+	obs_video_info ovi;
+	if (!obs_get_video_info(&ovi) || !ovi.base_width || !ovi.base_height || !canvas_width || !canvas_height) {
+		return -1;
+	}
+	const float mw = (float)ovi.base_width;
+	const float mh = (float)ovi.base_height;
+	const float vw = (float)canvas_width;
+	const float vh = (float)canvas_height;
+
+	autoGenerating = true;
+	int created = 0;
+	struct obs_frontend_source_list scenes = {};
+	obs_frontend_get_scenes(&scenes);
+	for (size_t i = 0; i < scenes.sources.num; i++) {
+		obs_source_t *main_source = scenes.sources.array[i];
+		obs_scene_t *main_scene = obs_scene_from_source(main_source);
+		if (!main_scene) {
+			continue;
+		}
+
+		bool has_link = false;
+		const QString linked = GetLinkedSceneName(main_source, &has_link);
+		obs_data_t *main_settings = obs_source_get_settings(main_source);
+		const bool generated_before = obs_data_get_bool(main_settings, "vadocast_vertical_generated");
+		/* Automatic mode: only main scenes that never had a vertical version (a link, even to a
+		 * deleted vertical scene, or an earlier generation means the user already decided). */
+		if (onlyNew && (has_link || generated_before || vadocast_count_items(main_scene) == 0)) {
+			obs_data_release(main_settings);
+			continue;
+		}
+
+		obs_scene_t *target = nullptr;
+		if (!linked.isEmpty()) {
+			target = obs_canvas_get_scene_by_name(canvas, linked.toUtf8().constData());
+		}
+		if (target && !overwrite) {
+			obs_scene_release(target);
+			obs_data_release(main_settings);
+			continue;
+		}
+		if (target) {
+			vadocast_clear_scene(target);
+		} else {
+			const std::string name = UniqueVerticalSceneName(obs_source_get_name(main_source));
+			target = CreateVerticalScene(name);
+			if (!target) {
+				obs_data_release(main_settings);
+				continue;
+			}
+			SetLinkedScene(main_source, QString::fromUtf8(name.c_str()));
+		}
+		obs_data_set_bool(main_settings, "vadocast_vertical_generated", true);
+		obs_data_release(main_settings);
+
+		/* Same sources in the same z-order (enumeration goes bottom to top, obs_scene_add adds on top) */
+		std::vector<obs_sceneitem_t *> items;
+		obs_scene_enum_items(main_scene, vadocast_collect_items, &items);
+		for (auto item : items) {
+			if (obs_sceneitem_is_group(item)) {
+				/* A group belongs to a single scene, so its children are added one by one */
+				std::vector<obs_sceneitem_t *> children;
+				obs_sceneitem_group_enum_items(item, vadocast_collect_items, &children);
+				for (auto child : children) {
+					vadocast_copy_item(target, child, item, mw, mh, vw, vh);
+					obs_sceneitem_release(child);
+				}
+			} else {
+				vadocast_copy_item(target, item, nullptr, mw, mh, vw, vh);
+			}
+			obs_sceneitem_release(item);
+		}
+
+		blog(LOG_INFO, "[Vertical] generated vertical scene '%s' from main scene '%s'",
+		     obs_source_get_name(obs_scene_get_source(target)), obs_source_get_name(main_source));
+		obs_scene_release(target);
+		created++;
+	}
+	obs_frontend_source_list_free(&scenes);
+	autoGenerating = false;
+	return created;
+}
+
+int CanvasDock::RunGenerateFromMain(bool overwrite)
+{
+	const int created = GenerateFromMain(overwrite, false);
+	if (created < 0) {
+		return created;
+	}
+	/* The user asked for the vertical version: keep new main scenes in sync from now on */
+	autoGenerateState = VADOCAST_AUTO_GEN_ON;
+	if (created > 0) {
+		MainSceneChanged();
+	}
+	return created;
+}
+
+void CanvasDock::GenerateFromMainClicked(bool overwrite)
+{
+	if (overwrite) {
+		QMessageBox mb(QMessageBox::Question, QString::fromUtf8(obs_module_text("RegenerateFromMainTitle")),
+			       QString::fromUtf8(obs_module_text("RegenerateFromMainConfirm")),
+			       QMessageBox::StandardButtons(QMessageBox::Yes | QMessageBox::No), this);
+		mb.setDefaultButton(QMessageBox::No);
+		if (mb.exec() != QMessageBox::Yes) {
+			return;
+		}
+	}
+	const int created = RunGenerateFromMain(overwrite);
+	if (created < 0) {
+		return;
+	}
+	if (created == 0) {
+		QMessageBox::information(this, QString::fromUtf8(obs_module_text("GenerateFromMain")),
+					 QString::fromUtf8(obs_module_text("GenerateFromMainNothing")));
+		return;
+	}
+	statusLabel->setText(QString::fromUtf8(obs_module_text("GenerateFromMainDone")).arg(created));
+	replayStatusResetTimer.start();
+}
+
+struct vadocast_canvas_scan {
+	std::vector<std::string> empty_scenes;
+	bool has_items = false;
+};
+
+static bool vadocast_scan_canvas_scene(void *param, obs_source_t *src)
+{
+	auto scan = static_cast<vadocast_canvas_scan *>(param);
+	obs_scene_t *scene = obs_scene_from_source(src);
+	const char *name = obs_source_get_name(src);
+	if (!scene || !name) {
+		return true;
+	}
+	if (vadocast_count_items(scene) > 0) {
+		scan->has_items = true;
+	} else {
+		scan->empty_scenes.emplace_back(name);
+	}
+	return true;
+}
+
+void CanvasDock::CheckAutoGenerate()
+{
+	if (!canvas || clearing || switching || autoGenerating) {
+		return;
+	}
+	if (autoGenerateState == VADOCAST_AUTO_GEN_ON) {
+		/* New main scenes get their vertical version; existing ones are never regenerated */
+		if (GenerateFromMain(false, true) > 0) {
+			MainSceneChanged();
+		}
+		return;
+	}
+	if (autoGenerateState != VADOCAST_AUTO_GEN_UNDECIDED) {
+		return;
+	}
+
+	vadocast_canvas_scan scan;
+	obs_canvas_enum_scenes(canvas, vadocast_scan_canvas_scene, &scan);
+	if (scan.has_items) {
+		/* The user already built vertical scenes: never generate automatically here */
+		autoGenerateState = VADOCAST_AUTO_GEN_OFF;
+		blog(LOG_INFO, "[Vertical] vertical scenes already have content, automatic generation is off");
+		return;
+	}
+	if (!vadocast_main_has_items()) {
+		/* Nothing to generate from yet, check again later */
+		return;
+	}
+
+	/* Every vertical scene is empty, so regenerating the linked ones loses nothing */
+	const int created = GenerateFromMain(true, false);
+	if (created < 0) {
+		return;
+	}
+	autoGenerateState = VADOCAST_AUTO_GEN_ON;
+	blog(LOG_INFO, "[Vertical] automatically generated %d vertical scene(s) from the main canvas", created);
+	if (created == 0) {
+		return;
+	}
+
+	/* Remove the empty placeholder scenes (e.g. the default "Vertical Scene") nothing links to */
+	std::vector<QString> linked_scenes;
+	struct obs_frontend_source_list scenes = {};
+	obs_frontend_get_scenes(&scenes);
+	for (size_t i = 0; i < scenes.sources.num; i++) {
+		const QString linked = GetLinkedSceneName(scenes.sources.array[i], nullptr);
+		if (!linked.isEmpty()) {
+			linked_scenes.push_back(linked);
+		}
+	}
+	obs_frontend_source_list_free(&scenes);
+	for (const auto &name : scan.empty_scenes) {
+		const QString qname = QString::fromUtf8(name.c_str());
+		if (std::find(linked_scenes.begin(), linked_scenes.end(), qname) != linked_scenes.end()) {
+			continue;
+		}
+		obs_source_t *s = obs_canvas_get_source_by_name(canvas, name.c_str());
+		if (!s) {
+			continue;
+		}
+		obs_scene_t *empty_scene = obs_scene_from_source(s);
+		if (empty_scene && vadocast_count_items(empty_scene) == 0) {
+			obs_source_remove(s);
+		}
+		obs_source_release(s);
+	}
+
+	MainSceneChanged();
 }

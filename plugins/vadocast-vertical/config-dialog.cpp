@@ -1180,31 +1180,8 @@ void OBSBasicSettings::SaveSettings()
 	uint32_t height = res.height() > 0 ? (uint32_t)res.height() : 0;
 	vadocast_clamp_vertical_resolution(width, height);
 	if (width != canvasDock->canvas_width || height != canvasDock->canvas_height) {
-		if (obs_output_active(canvasDock->replayOutput)) {
-			obs_output_stop(canvasDock->replayOutput);
-		}
-
-		blog(LOG_INFO, "[Vertical] resolution changed from %dx%d to %dx%d", canvasDock->canvas_width,
-		     canvasDock->canvas_height, width, height);
-
-		canvasDock->canvas_width = width;
-		canvasDock->canvas_height = height;
-		obs_video_info ovi;
-		obs_get_video_info(&ovi);
-		ovi.base_width = width;
-		ovi.base_height = height;
-		ovi.output_width = width;
-		ovi.output_height = height;
-		obs_canvas_reset_video(canvasDock->canvas, &ovi);
-
-		auto t = obs_weak_source_get_source(canvasDock->source);
-		if (obs_source_get_type(t) == OBS_SOURCE_TYPE_TRANSITION) {
-			obs_transition_set_size(t, width, height);
-		}
-		obs_source_release(t);
-
-		canvasDock->LoadScenes();
-		canvasDock->ProfileChanged();
+		// vadocast: shared with the vadocast_vertical_set_resolution proc handler
+		canvasDock->ApplyResolution(width, height);
 	}
 	if (virtualCameraMode->currentIndex() >= 0) {
 		canvasDock->virtual_cam_mode = virtualCameraMode->currentIndex();

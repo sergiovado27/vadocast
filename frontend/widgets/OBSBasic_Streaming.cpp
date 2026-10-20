@@ -20,6 +20,7 @@
 #include "OBSBasic.hpp"
 
 #include <components/UIValidation.hpp>
+#include <utility/VadocastGoLive.hpp>
 #ifdef YOUTUBE_ENABLED
 #include <docks/YouTubeAppDock.hpp>
 #include <utility/YoutubeApiWrappers.hpp>
@@ -390,6 +391,11 @@ void OBSBasic::StreamingStop(int code, QString last_error)
 
 void OBSBasic::StreamActionTriggered()
 {
+	/* vadocast: the stream button opens the "Transmitir" panel (or stops every destination). */
+	if (VadocastGoLiveCall("vadocast_golive_toggle")) {
+		return;
+	}
+
 	if (outputHandler->StreamingActive()) {
 		bool confirm = config_get_bool(App()->GetUserConfig(), "BasicWindow", "WarnBeforeStoppingStream");
 

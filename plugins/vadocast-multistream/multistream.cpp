@@ -30,6 +30,7 @@ bool obs_module_load(void)
 	const auto main_window = static_cast<QMainWindow *>(obs_frontend_get_main_window());
 	multistream_dock = new MultistreamDock(main_window);
 	obs_frontend_add_dock_by_id("VadocastMultistreamDock", obs_module_text("Multistream"), multistream_dock);
+	multistream_dock->RegisterGoLiveProcs();
 
 	return true;
 }
@@ -426,6 +427,8 @@ MultistreamDock::MultistreamDock(QWidget *parent) : QFrame(parent)
 			}
 		}
 		calldata_free(&cd);
+
+		UpdateMainStreamButton();
 	});
 	videoCheckTimer.start(500);
 	LoadSettingsFile();
@@ -480,9 +483,16 @@ void MultistreamDock::frontend_event(enum obs_frontend_event event, void *privat
 		md->outputButtonStyle(md->mainStreamButton);
 		md->mainStreamButton->setIcon(md->streamActiveIcon);
 		md->storeMainStreamEncoders();
+		if (event == OBS_FRONTEND_EVENT_STREAMING_STARTED) {
+			/* vadocast: the other horizontal destinations share the main encoders. */
+			md->StartPendingHorizontal();
+		}
 	} else if (event == OBS_FRONTEND_EVENT_STREAMING_STOPPING || event == OBS_FRONTEND_EVENT_STREAMING_STOPPED) {
 		md->mainStreamButton->setChecked(false);
 		md->outputButtonStyle(md->mainStreamButton);
+		if (event == OBS_FRONTEND_EVENT_STREAMING_STOPPED) {
+			md->pendingHorizontal.clear();
+		}
 	}
 }
 
@@ -810,7 +820,7 @@ bool MultistreamDock::StartOutput(obs_data_t *settings, QPushButton *streamButto
 	}
 
 	bool warnBeforeStreamStart = config_get_bool(get_user_config(), "BasicWindow", "WarnBeforeStartingStream");
-	if (warnBeforeStreamStart && isVisible()) {
+	if (warnBeforeStreamStart && isVisible() && !suppressConfirm) {
 		auto button = QMessageBox::question(this, QString::fromUtf8(obs_frontend_get_locale_string("ConfirmStart.Title")),
 						    QString::fromUtf8(obs_frontend_get_locale_string("ConfirmStart.Text")),
 						    QMessageBox::Yes | QMessageBox::No, QMessageBox::No);

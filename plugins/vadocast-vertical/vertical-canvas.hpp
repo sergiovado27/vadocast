@@ -76,7 +76,15 @@ public:
 	std::string stream_server;
 	bool enabled = true;
 	bool stopping = false;
+	/* vadocast: obs_output_start() succeeded and no "stop" signal arrived yet
+	 * (covers the connecting phase, where obs_output_active() is still false). */
+	bool starting = false;
 };
+
+/* vadocast: per scene collection state of the automatic vertical generation. */
+#define VADOCAST_AUTO_GEN_UNDECIDED 0
+#define VADOCAST_AUTO_GEN_ON 1
+#define VADOCAST_AUTO_GEN_OFF 2
 
 class CanvasDock : public QFrame {
 	Q_OBJECT
@@ -233,6 +241,14 @@ private:
 	bool first_time = false;
 	bool multi_rtmp = false;
 	bool disable_stream_settings = false;
+
+	/* vadocast: automatic generation of the vertical scenes from the main canvas */
+	int autoGenerateState = VADOCAST_AUTO_GEN_UNDECIDED;
+	bool autoGenerating = false;
+	QString GetLinkedSceneName(obs_source_t *mainScene, bool *hasEntry);
+	obs_scene_t *CreateVerticalScene(const std::string &name);
+	std::string UniqueVerticalSceneName(const char *base);
+	void MigrateLinkedScenes(uint32_t old_width, uint32_t old_height);
 
 	QColor GetSelectionColor() const;
 	QColor GetCropColor() const;
@@ -467,6 +483,15 @@ public:
 	bool RecordingActive();
 	bool BacktrackActive();
 	bool VirtualCameraActive();
+
+	/* vadocast */
+	bool StreamingActiveOrStarting();
+	bool AnyOutputActive();
+	bool ApplyResolution(uint32_t width, uint32_t height);
+	int GenerateFromMain(bool overwrite, bool onlyNew = false);
+	int RunGenerateFromMain(bool overwrite);
+	void GenerateFromMainClicked(bool overwrite);
+	void CheckAutoGenerate();
 };
 
 class LockedCheckBox : public QCheckBox {

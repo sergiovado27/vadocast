@@ -4,6 +4,7 @@
 
 #include <QMenu>
 #include <QToolBar>
+#include <QToolButton>
 #include <QWidgetAction>
 
 #include "name-dialog.hpp"
@@ -37,6 +38,11 @@ void CanvasScenesDock::ShowScenesContextMenu(QListWidgetItem *widget_item)
 	a->setCheckable(true);
 	a->setChecked(IsGridMode());
 	menu.addAction(QString::fromUtf8(obs_frontend_get_locale_string("Add")), [this] { canvasDock->AddScene(); });
+	// vadocast: build the vertical scenes from the horizontal (main canvas) ones
+	menu.addAction(QString::fromUtf8(obs_module_text("GenerateFromMain")),
+		       [this] { canvasDock->GenerateFromMainClicked(false); });
+	menu.addAction(QString::fromUtf8(obs_module_text("RegenerateFromMain")),
+		       [this] { canvasDock->GenerateFromMainClicked(true); });
 	if (!widget_item) {
 		menu.exec(QCursor::pos());
 		return;
@@ -368,6 +374,22 @@ CanvasScenesDock::CanvasScenesDock(CanvasDock *canvas_dock, QWidget *parent) : Q
 	toolbar->widgetForAction(a)->setProperty("themeID", QVariant(QString::fromUtf8("downArrowIconSmall")));
 	toolbar->widgetForAction(a)->setProperty("class", "icon-down");
 	mainLayout->addWidget(toolbar, 0);
+
+	// vadocast: build the vertical scenes from the horizontal (main canvas) ones.
+	// Click: only main scenes without a vertical version; menu: regenerate everything.
+	auto generateButton = new QToolButton(this);
+	generateButton->setObjectName(QStringLiteral("verticalGenerateFromMain"));
+	generateButton->setText(QString::fromUtf8(obs_module_text("GenerateFromMain")));
+	generateButton->setToolTip(QString::fromUtf8(obs_module_text("GenerateFromMainTooltip")));
+	generateButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
+	generateButton->setPopupMode(QToolButton::MenuButtonPopup);
+	generateButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+	auto generateMenu = new QMenu(generateButton);
+	generateMenu->addAction(QString::fromUtf8(obs_module_text("RegenerateFromMain")),
+				[this] { canvasDock->GenerateFromMainClicked(true); });
+	generateButton->setMenu(generateMenu);
+	connect(generateButton, &QToolButton::clicked, [this] { canvasDock->GenerateFromMainClicked(false); });
+	mainLayout->addWidget(generateButton, 0);
 
 	setObjectName(QStringLiteral("contextContainer"));
 	setContentsMargins(0, 0, 0, 0);

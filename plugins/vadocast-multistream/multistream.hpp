@@ -1,14 +1,20 @@
 #pragma once
 
 #include "config-dialog.hpp"
+#include "golive-dialog.hpp"
 #include "obs-websocket-api.h"
 #include <obs.h>
 #include <obs-frontend-api.h>
 #include <QFrame>
+#include <QPointer>
 #include <QPushButton>
 #include <QString>
 #include <QTimer>
 #include <QVBoxLayout>
+
+#include <map>
+#include <string>
+#include <vector>
 
 class OBSBasicSettings;
 
@@ -41,6 +47,17 @@ private:
 
 	obs_websocket_vendor vendor = nullptr;
 
+	/* vadocast "Transmitir" panel state */
+	QPointer<GoLiveDialog> goLiveDialog;
+	std::vector<std::string> pendingHorizontal; // started once the main stream is up
+	std::map<std::string, QPushButton *> hiddenOutputButtons;
+	bool suppressConfirm = false;
+
+	QPushButton *FindOutputButton(const std::string &name);
+	void StartPendingHorizontal();
+	void UpdateMainStreamButton();
+	bool StartVerticalDestinations(QWidget *parent);
+
 	void LoadSettingsFile();
 	void LoadSettings();
 	void LoadOutput(obs_data_t *data, bool vertical);
@@ -70,6 +87,21 @@ public:
 	~MultistreamDock();
 	void LoadVerticalOutputs(bool firstLoad = true);
 	void LoadWebsocket();
+
+	/* vadocast "Transmitir" panel (implemented in golive.cpp) */
+	int GetGoLiveMode();
+	void SetGoLiveMode(int mode);
+	obs_data_array_t *GetHorizontalDestinations(); // caller releases
+	void HorizontalDestinationsChanged();
+	bool VerticalAvailable();
+	obs_data_array_t *GetVerticalDestinations(); // caller releases, nullptr without vertical canvas
+	void SetVerticalDestinations(obs_data_array_t *destinations);
+	bool IsLive();
+	bool GoLiveStart(QWidget *parent);
+	void GoLiveStop();
+	void ToggleGoLive();
+	void ShowGoLive();
+	void RegisterGoLiveProcs();
 };
 
 class AspectRatioPixmapLabel : public QLabel {

@@ -20,6 +20,7 @@
 #include "OBSBasic.hpp"
 
 #include <widgets/OBSBasicStats.hpp>
+#include <utility/VadocastGoLive.hpp>
 
 void OBSBasic::InitHotkeys()
 {
@@ -139,14 +140,53 @@ void OBSBasic::CreateHotkeys()
 		return false;                                              \
 	}
 
-	streamingHotkeys = obs_hotkey_pair_register_frontend(
-		"OBSBasic.StartStreaming", Str("Basic.Main.StartStreaming"), "OBSBasic.StopStreaming",
-		Str("Basic.Main.StopStreaming"),
-		MAKE_CALLBACK(!basic.outputHandler->StreamingActive() && !basic.streamingStarting, basic.StartStreaming,
-			      "Starting stream"),
-		MAKE_CALLBACK(basic.outputHandler->StreamingActive() && !basic.streamingStarting, basic.StopStreaming,
-			      "Stopping stream"),
-		this, this);
+	/* vadocast: the streaming hotkeys start/stop every destination of the "Transmitir"
+	 * panel (with its saved mode), falling back to the main stream without the module. */
+	auto startStreamingHotkey = [](void *data, obs_hotkey_pair_id, obs_hotkey_t *, bool pressed) {
+		OBSBasic &basic = *static_cast<OBSBasic *>(data);
+		if (!pressed) {
+			return false;
+		}
+		bool live = false;
+		if (VadocastGoLiveCall("vadocast_golive_active", &live)) {
+			if (live) {
+				return false;
+			}
+			blog(LOG_INFO, "Starting stream due to hotkey");
+			VadocastGoLiveCall("vadocast_golive_start");
+			return true;
+		}
+		if (!basic.outputHandler->StreamingActive() && !basic.streamingStarting) {
+			blog(LOG_INFO, "Starting stream due to hotkey");
+			basic.StartStreaming();
+			return true;
+		}
+		return false;
+	};
+	auto stopStreamingHotkey = [](void *data, obs_hotkey_pair_id, obs_hotkey_t *, bool pressed) {
+		OBSBasic &basic = *static_cast<OBSBasic *>(data);
+		if (!pressed) {
+			return false;
+		}
+		bool live = false;
+		if (VadocastGoLiveCall("vadocast_golive_active", &live)) {
+			if (!live) {
+				return false;
+			}
+			blog(LOG_INFO, "Stopping stream due to hotkey");
+			VadocastGoLiveCall("vadocast_golive_stop");
+			return true;
+		}
+		if (basic.outputHandler->StreamingActive() && !basic.streamingStarting) {
+			blog(LOG_INFO, "Stopping stream due to hotkey");
+			basic.StopStreaming();
+			return true;
+		}
+		return false;
+	};
+	streamingHotkeys = obs_hotkey_pair_register_frontend("OBSBasic.StartStreaming", Str("Basic.Main.StartStreaming"),
+							     "OBSBasic.StopStreaming", Str("Basic.Main.StopStreaming"),
+							     startStreamingHotkey, stopStreamingHotkey, this, this);
 	LoadHotkeyPair(streamingHotkeys, "OBSBasic.StartStreaming", "OBSBasic.StopStreaming");
 
 	auto cb = [](void *data, obs_hotkey_id, obs_hotkey_t *, bool pressed) {
