@@ -59,4 +59,6 @@ target_sources(
     widgets/OBSQTDisplay.hpp
     widgets/StatusBarWidget.cpp
     widgets/StatusBarWidget.hpp
+    widgets/VadocastMixer.cpp
+    widgets/VadocastMixer.hpp
 )

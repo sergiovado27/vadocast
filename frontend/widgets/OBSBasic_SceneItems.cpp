@@ -34,6 +34,7 @@
 #include <sstream>
 
 #include <vadocast-limits.h>
+#include <dialogs/VadocastAddSource.hpp>
 
 using namespace std;
 
@@ -827,20 +828,8 @@ static inline bool should_show_properties(obs_source_t *source, const char *id)
 
 void OBSBasic::AddSourceDialog()
 {
-	QAction *action = qobject_cast<QAction *>(sender());
-	if (!action) {
-		return;
-	}
-
-	if (addWindow) {
-		addWindow->close();
-	}
-
-	addWindow = new OBSBasicSourceSelect(this, undo_s);
-	addWindow->show();
-
-	addWindow->setAttribute(Qt::WA_DeleteOnClose, true);
-	connect(this, &OBSBasic::sourceUuidDropped, addWindow, &OBSBasicSourceSelect::sourceDropped);
+	/* vadocast: all-in-one "Añadir fuente" panel (type, preview and settings together). */
+	VadocastShowAddSource(this, GetCurrentScene());
 }
 
 void OBSBasic::on_actionAddSource_triggered()

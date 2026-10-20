@@ -431,6 +431,12 @@ public slots:
 	void ShowContextBar();
 	void HideContextBar();
 
+	/* vadocast */
+	void VadocastApplyLayout();
+	void VadocastForceCutTransition();
+	void VadocastOpenSettings(int section);
+	void VadocastOpenAudioSettings();
+
 	void ClearContextBar();
 	void UpdateContextBar(bool force = false);
 	void UpdateContextBarDeferred(bool force = false);

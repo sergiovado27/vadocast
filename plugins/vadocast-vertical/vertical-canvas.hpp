@@ -492,6 +492,11 @@ public:
 	int RunGenerateFromMain(bool overwrite);
 	void GenerateFromMainClicked(bool overwrite);
 	void CheckAutoGenerate();
+	/* Adds the source of a main canvas scene item to the linked vertical scene (same layout rules as the generation) */
+	bool MirrorMainItem(obs_sceneitem_t *item);
+	/* Video bitrate (kbps) and encoder id used by the vertical stream */
+	void GetStreamEncoderSettings(long long &bitrate, std::string &encoder);
+	bool SetStreamEncoderSettings(long long bitrate, const std::string &encoder);
 };
 
 class LockedCheckBox : public QCheckBox {

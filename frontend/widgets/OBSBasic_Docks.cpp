@@ -258,3 +258,154 @@ void OBSBasic::RepairCustomExtraDockName()
 
 	dock->setObjectName(extraCustomDockNames[idx]);
 }
+
+/* ------------------------------------------------------------------------- */
+/* vadocast: fixed "live studio" layout                                      */
+/*                                                                           */
+/*  left:   Escenas / Fuentes (+ Fuentes verticales as a tab)                */
+/*  center: horizontal preview                                               */
+/*  right:  vertical preview | Sonido above the Transmitir controls          */
+/*                                                                           */
+/* Docks cannot be moved, floated or closed, and OBS-only panels (scene      */
+/* transitions, stats, multistream dock, vertical scenes/transitions) are    */
+/* hidden. The layout is re-applied on every start, so a saved OBS dock      */
+/* state never brings the old look back.                                     */
+/* ------------------------------------------------------------------------- */
+
+static QDockWidget *FindExtraDock(QMainWindow *window, const char *name)
+{
+	return window->findChild<QDockWidget *>(QString::fromUtf8(name), Qt::FindDirectChildrenOnly);
+}
+
+static void LockDock(QDockWidget *dock)
+{
+	if (!dock) {
+		return;
+	}
+	dock->setFloating(false);
+	dock->setFeatures(QDockWidget::NoDockWidgetFeatures);
+	dock->toggleViewAction()->setVisible(false);
+}
+
+void OBSBasic::VadocastApplyLayout()
+{
+	/* Menus: only "File" (settings, exit) and "Help" remain. */
+	ui->menuBasic_MainMenu_Edit->menuAction()->setVisible(false);
+	ui->viewMenu->menuAction()->setVisible(false);
+	ui->menuDocks->menuAction()->setVisible(false);
+	ui->profileMenu->menuAction()->setVisible(false);
+	ui->sceneCollectionMenu->menuAction()->setVisible(false);
+	ui->menuTools->menuAction()->setVisible(false);
+	ui->actionShow_Recordings->setVisible(false);
+	ui->actionRemux->setVisible(false);
+	ui->actionShowProfileFolder->setVisible(false);
+
+	/* Controls: only "Transmitir" and settings (no recording, replay buffer,
+	 * virtual camera, studio mode or YouTube broadcast management). */
+	if (controlsDock) {
+		static const char *hiddenControls[] = {"broadcastButton",  "recordButton",           "pauseRecordButton",
+						       "replayBufferButton", "saveReplayButton",       "virtualCamButton",
+						       "virtualCamConfigButton", "modeSwitch",          "exitButton"};
+		for (const char *name : hiddenControls) {
+			if (QWidget *button = controlsDock->findChild<QWidget *>(QString::fromUtf8(name))) {
+				button->setVisible(false);
+			}
+		}
+		if (QWidget *streamButton = controlsDock->findChild<QWidget *>(QStringLiteral("streamButton"))) {
+			setClasses(streamButton, "vc-primary");
+			streamButton->setMinimumHeight(44);
+		}
+	}
+
+	/* Preview: no OBS context toolbar or zoom/scaling bar under it. */
+	ui->contextContainer->setVisible(false);
+	config_set_bool(App()->GetUserConfig(), "BasicWindow", "ShowContextToolbars", false);
+	static const char *hiddenPreviewWidgets[] = {"previewScalePercent", "previewScalingMode", "previewZoomInButton",
+						     "previewZoomOutButton"};
+	for (const char *name : hiddenPreviewWidgets) {
+		if (QWidget *widget = findChild<QWidget *>(QString::fromUtf8(name))) {
+			widget->setVisible(false);
+		}
+	}
+
+	/* Panels that are not part of vadocast. */
+	ui->transitionsDock->setVisible(false);
+	ui->transitionsDock->toggleViewAction()->setVisible(false);
+	if (statsDock) {
+		statsDock->setVisible(false);
+	}
+	static const char *hiddenExtraDocks[] = {"VadocastMultistreamDock", "VerticalCanvasDockScenes",
+						 "VerticalCanvasDockTransitions"};
+	for (const char *name : hiddenExtraDocks) {
+		if (QDockWidget *dock = FindExtraDock(this, name)) {
+			dock->setFloating(false);
+			dock->setVisible(false);
+			dock->toggleViewAction()->setVisible(false);
+		}
+	}
+
+	QDockWidget *verticalDock = FindExtraDock(this, "VerticalCanvasDock");
+	QDockWidget *verticalSources = FindExtraDock(this, "VerticalCanvasDockSources");
+
+	setDockCornersVertical(true);
+
+	/* Left column: scenes above sources. */
+	addDockWidget(Qt::LeftDockWidgetArea, ui->scenesDock);
+	splitDockWidget(ui->scenesDock, ui->sourcesDock, Qt::Vertical);
+	ui->scenesDock->setVisible(true);
+	ui->sourcesDock->setVisible(true);
+	if (verticalSources) {
+		verticalSources->setFloating(false);
+		tabifyDockWidget(ui->sourcesDock, verticalSources);
+		verticalSources->setVisible(true);
+		ui->sourcesDock->raise();
+	}
+
+	/* Right side: vertical preview, then sound above the go-live controls. */
+	QDockWidget *rightColumnAnchor = ui->mixerDock;
+	if (verticalDock) {
+		verticalDock->setFloating(false);
+		addDockWidget(Qt::RightDockWidgetArea, verticalDock);
+		verticalDock->setVisible(true);
+		splitDockWidget(verticalDock, ui->mixerDock, Qt::Horizontal);
+	} else {
+		addDockWidget(Qt::RightDockWidgetArea, ui->mixerDock);
+	}
+	ui->mixerDock->setVisible(true);
+	if (controlsDock) {
+		splitDockWidget(rightColumnAnchor, controlsDock, Qt::Vertical);
+		controlsDock->setVisible(true);
+	}
+
+	/* Sizes: side columns compact, previews get the rest. */
+	const int sideWidth = std::max(240, width() * 18 / 100);
+	resizeDocks({ui->scenesDock, ui->sourcesDock}, {sideWidth, sideWidth}, Qt::Horizontal);
+	resizeDocks({ui->mixerDock}, {std::max(280, width() * 20 / 100)}, Qt::Horizontal);
+	if (verticalDock) {
+		resizeDocks({verticalDock}, {std::max(260, width() * 18 / 100)}, Qt::Horizontal);
+	}
+	resizeDocks({ui->scenesDock, ui->sourcesDock}, {height() * 35 / 100, height() * 65 / 100}, Qt::Vertical);
+	if (controlsDock) {
+		resizeDocks({ui->mixerDock, controlsDock}, {height() * 75 / 100, height() * 25 / 100}, Qt::Vertical);
+	}
+
+	/* Lock everything in place. */
+	ui->lockDocks->setChecked(true);
+	ui->lockDocks->setVisible(false);
+	ui->sideDocks->setVisible(false);
+	ui->resetDocks->setVisible(false);
+	LockDock(ui->scenesDock);
+	LockDock(ui->sourcesDock);
+	LockDock(ui->mixerDock);
+	LockDock(controlsDock);
+	LockDock(verticalDock);
+	LockDock(verticalSources);
+}
+
+void OBSBasic::VadocastForceCutTransition()
+{
+	/* vadocast has no scene transitions: scenes always switch instantly. */
+	if (cutTransition) {
+		SetTransition(OBSSource(cutTransition));
+	}
+}

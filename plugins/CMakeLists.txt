@@ -93,7 +93,8 @@ add_obs_plugin(
 )
 add_obs_plugin(obs-webrtc)
 
-check_obs_websocket()
+# vadocast: the obs-websocket remote-control server is not built (submodule kept untouched).
+# check_obs_websocket()
 
 add_obs_plugin(obs-x264)
 add_obs_plugin(oss-audio PLATFORMS FREEBSD OPENBSD)

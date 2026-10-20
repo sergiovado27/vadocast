@@ -10,5 +10,7 @@
 	<file>media/unknown.png</file>
 	<file>media/youtube.png</file>
 	<file>media/kick.png</file>
+	<file>media/eye.svg</file>
+	<file>media/eye-off.svg</file>
   </qresource>
 </RCC>

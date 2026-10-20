@@ -461,6 +461,54 @@ static void stream_active(void *data, calldata_t *cd)
 	calldata_set_bool(cd, "active", active);
 }
 
+static void mirror_item(void *data, calldata_t *cd)
+{
+	UNUSED_PARAMETER(data);
+	obs_sceneitem_t *item = static_cast<obs_sceneitem_t *>(calldata_ptr(cd, "item"));
+	bool success = false;
+	if (item && !canvas_docks.empty()) {
+		CanvasDock *dock = canvas_docks.front();
+		run_on_dock_thread(dock, [dock, item, &success] { success = dock->MirrorMainItem(item); });
+	}
+	calldata_set_bool(cd, "success", success);
+}
+
+static void get_encoder_settings(void *data, calldata_t *cd)
+{
+	UNUSED_PARAMETER(data);
+	long long bitrate = 0;
+	std::string encoder;
+	if (!canvas_docks.empty()) {
+		CanvasDock *dock = canvas_docks.front();
+		run_on_dock_thread(dock, [dock, &bitrate, &encoder] { dock->GetStreamEncoderSettings(bitrate, encoder); });
+	}
+	calldata_set_int(cd, "bitrate", bitrate);
+	calldata_set_string(cd, "encoder", encoder.c_str());
+}
+
+static void set_encoder_settings(void *data, calldata_t *cd)
+{
+	UNUSED_PARAMETER(data);
+	const long long bitrate = calldata_int(cd, "bitrate");
+	const char *enc = calldata_string(cd, "encoder");
+	const std::string encoder = enc ? enc : "";
+	bool success = false;
+	if (!canvas_docks.empty() && bitrate > 0) {
+		CanvasDock *dock = canvas_docks.front();
+		run_on_dock_thread(dock, [dock, bitrate, &encoder, &success] {
+			if (dock->StreamingActiveOrStarting()) {
+				blog(LOG_WARNING, "[Vertical] stream encoder not changed: the vertical stream is active");
+				return;
+			}
+			success = dock->SetStreamEncoderSettings(bitrate, encoder);
+			if (success) {
+				save_canvas();
+			}
+		});
+	}
+	calldata_set_bool(cd, "success", success);
+}
+
 obs_websocket_vendor vendor = nullptr;
 
 void vendor_request_version(obs_data_t *request_data, obs_data_t *response_data, void *)
@@ -738,6 +786,11 @@ bool obs_module_load(void)
 	proc_handler_add(ph, "void vadocast_vertical_set_resolution(in int width, in int height, out bool success)",
 			 set_resolution, nullptr);
 	proc_handler_add(ph, "void vadocast_vertical_stream_active(out bool active)", stream_active, nullptr);
+	proc_handler_add(ph, "void vadocast_vertical_mirror_item(in ptr item, out bool success)", mirror_item, nullptr);
+	proc_handler_add(ph, "void vadocast_vertical_get_encoder_settings(out int bitrate, out string encoder)",
+			 get_encoder_settings, nullptr);
+	proc_handler_add(ph, "void vadocast_vertical_set_encoder_settings(in int bitrate, in string encoder, out bool success)",
+			 set_encoder_settings, nullptr);
 
 	return true;
 }
@@ -1459,6 +1512,11 @@ CanvasDock::CanvasDock(obs_data_t *settings, QWidget *parent)
 	replayButtonGroupLayout->addWidget(replayButton);
 
 	buttonRow->addLayout(replayButtonGroupLayout);
+
+	/* vadocast: no recording or Backtrack in the interface. */
+	recordButton->setVisible(false);
+	replayEnableButton->setVisible(false);
+	replayButton->setVisible(false);
 
 	virtualCamButton = new QPushButton;
 	virtualCamButton->setMinimumHeight(30);
@@ -9932,4 +9990,142 @@ void CanvasDock::CheckAutoGenerate()
 	}
 
 	MainSceneChanged();
+}
+
+/* vadocast: a source added to a main scene also goes to the linked vertical scene */
+bool CanvasDock::MirrorMainItem(obs_sceneitem_t *item)
+{
+	if (!canvas || !item || clearing || switching) {
+		return false;
+	}
+	obs_scene_t *main_scene = obs_sceneitem_get_scene(item);
+	if (!main_scene) {
+		return false;
+	}
+	obs_source_t *main_source = obs_scene_get_source(main_scene);
+	if (!main_source) {
+		return false;
+	}
+	obs_video_info ovi;
+	if (!obs_get_video_info(&ovi) || !ovi.base_width || !ovi.base_height || !canvas_width || !canvas_height) {
+		return false;
+	}
+	/* Only main scenes carry the link (items of groups or vertical scenes have none) */
+	const QString linked = GetLinkedSceneName(main_source, nullptr);
+	if (linked.isEmpty()) {
+		return false;
+	}
+	obs_scene_t *target = obs_canvas_get_scene_by_name(canvas, linked.toUtf8().constData());
+	if (!target) {
+		return false;
+	}
+	if (target == main_scene) {
+		obs_scene_release(target);
+		return false;
+	}
+
+	obs_sceneitem_force_update_transform(item);
+	const size_t before = vadocast_count_items(target);
+	vadocast_copy_item(target, item, nullptr, (float)ovi.base_width, (float)ovi.base_height, (float)canvas_width,
+			   (float)canvas_height);
+	const bool added = vadocast_count_items(target) > before;
+	if (added) {
+		blog(LOG_INFO, "[Vertical] added '%s' to the vertical scene '%s'",
+		     obs_source_get_name(obs_sceneitem_get_source(item)), obs_source_get_name(obs_scene_get_source(target)));
+	}
+	obs_scene_release(target);
+	return added;
+}
+
+/* vadocast: video bitrate (kbps) and encoder id of the vertical stream, as used by GetStreamVideoEncoder */
+void CanvasDock::GetStreamEncoderSettings(long long &bitrate, std::string &encoder)
+{
+	if (stream_advanced_settings) {
+		encoder = stream_encoder;
+		bitrate = stream_encoder_settings ? obs_data_get_int(stream_encoder_settings, "bitrate") : 0;
+		if (bitrate <= 0) {
+			bitrate = streamingVideoBitrate;
+		}
+	} else {
+		/* Same encoder as the main stream */
+		config_t *config = obs_frontend_get_profile_config();
+		const char *mode = config ? config_get_string(config, "Output", "Mode") : nullptr;
+		const char *id = nullptr;
+		if (mode && strcmp(mode, "Advanced") == 0) {
+			id = config_get_string(config, "AdvOut", "Encoder");
+		} else if (config) {
+			const char *simple = config_get_string(config, "SimpleOutput", "StreamEncoder");
+			id = get_simple_output_encoder(simple ? simple : "");
+		}
+		encoder = id ? id : "";
+		bitrate = streamingVideoBitrate;
+	}
+	if (bitrate <= 0) {
+		/* Default shown by the vertical settings dialog */
+		bitrate = 6000;
+	}
+}
+
+/* vadocast: same path as the vertical settings dialog (OBSBasicSettings::SaveSettings). An empty encoder, or the
+ * encoder already in use while following the main stream, keeps following the main stream encoder. */
+bool CanvasDock::SetStreamEncoderSettings(long long bitrate, const std::string &encoder)
+{
+	if (bitrate <= 0 || StreamingActiveOrStarting()) {
+		return false;
+	}
+	if (!encoder.empty() && obs_get_encoder_type(encoder.c_str()) != OBS_ENCODER_VIDEO) {
+		blog(LOG_WARNING, "[Vertical] '%s' is not a video encoder", encoder.c_str());
+		return false;
+	}
+
+	long long current_bitrate = 0;
+	std::string current_encoder;
+	GetStreamEncoderSettings(current_bitrate, current_encoder);
+
+	const bool advanced = !(encoder.empty() || (!stream_advanced_settings && encoder == current_encoder));
+	if (stream_advanced_settings != advanced || (advanced && stream_encoder != encoder)) {
+		if (advanced && stream_encoder != encoder) {
+			obs_data_t *defaults = obs_encoder_defaults(encoder.c_str());
+			if (defaults) {
+				obs_data_release(stream_encoder_settings);
+				stream_encoder_settings = defaults;
+			}
+		}
+		stream_advanced_settings = advanced;
+		if (advanced) {
+			stream_encoder = encoder;
+		}
+		/* The video encoder is created again on the next start */
+		for (auto it = streamOutputs.begin(); it != streamOutputs.end(); ++it) {
+			if (it->output && !obs_output_active(it->output)) {
+				auto old_enc = obs_output_get_video_encoder(it->output);
+				obs_output_set_video_encoder(it->output, nullptr);
+				obs_encoder_release(old_enc);
+			}
+		}
+	}
+
+	streamingVideoBitrate = (uint32_t)bitrate;
+	if (advanced && stream_encoder_settings) {
+		obs_data_set_int(stream_encoder_settings, "bitrate", bitrate);
+	}
+	for (auto it = streamOutputs.begin(); it != streamOutputs.end(); ++it) {
+		if (!it->output) {
+			continue;
+		}
+		obs_encoder_t *enc = obs_output_get_video_encoder(it->output);
+		if (!enc) {
+			continue;
+		}
+		obs_data_t *settings = obs_encoder_get_settings(enc);
+		if (!settings) {
+			continue;
+		}
+		if (obs_data_get_int(settings, "bitrate") != bitrate) {
+			obs_data_set_int(settings, "bitrate", bitrate);
+			obs_encoder_update(enc, nullptr);
+		}
+		obs_data_release(settings);
+	}
+	return true;
 }

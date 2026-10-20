@@ -45,6 +45,7 @@
 #include <utility/WhatsNewInfoThread.hpp>
 #endif
 #include <widgets/AudioMixer.hpp>
+#include <widgets/VadocastMixer.hpp>
 #include <widgets/OBSProjector.hpp>
 
 #include <OBSStudioAPI.hpp>
@@ -1197,11 +1198,14 @@ void OBSBasic::OBSInit()
 #endif
 
 	// Set up Audio Mixer dock
+	/* vadocast: the simple "Sonido" panel replaces OBS' mixer. The OBS mixer is
+	 * still created (hidden) because other parts of the window talk to it. */
 	AudioMixer *audioMixer = new AudioMixer(this);
-	ui->mixerDock->setWidget(audioMixer);
-	ui->mixerDock->setContextMenuPolicy(Qt::CustomContextMenu);
-
-	connect(ui->mixerDock, &QDockWidget::customContextMenuRequested, audioMixer, &AudioMixer::showMixerContextMenu);
+	audioMixer->hide();
+	VadocastMixer *vadocastMixer = new VadocastMixer(this);
+	ui->mixerDock->setWidget(vadocastMixer);
+	ui->mixerDock->setWindowTitle(QTStr("Vadocast.Mixer.Title"));
+	connect(vadocastMixer, &VadocastMixer::addAudioRequested, this, &OBSBasic::VadocastOpenAudioSettings);
 
 	/* setup stats dock */
 	OBSBasicStats *statsDlg = new OBSBasicStats(statsDock, false);
@@ -1359,6 +1363,9 @@ void OBSBasic::OBSInit()
 
 	UpdatePreviewProgramIndicators();
 	OnFirstLoad();
+
+	/* vadocast: modules have created their docks by now; lay everything out. */
+	QTimer::singleShot(0, this, &OBSBasic::VadocastApplyLayout);
 
 	if (!hideWindowOnStart) {
 		activateWindow();
@@ -2183,6 +2190,10 @@ void OBSBasic::SetDisplayAffinity(QWindow *window)
 
 void OBSBasic::OnEvent(enum obs_frontend_event event)
 {
+	if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING || event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED) {
+		VadocastForceCutTransition();
+	}
+
 	if (api) {
 		api->on_event(event);
 	}

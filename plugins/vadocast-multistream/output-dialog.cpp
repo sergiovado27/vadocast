@@ -1,1095 +1,235 @@
 #include "output-dialog.hpp"
 
-#include <QDialog>
-#include <QVBoxLayout>
+#include <QAction>
+#include <QFrame>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QLabel>
-#include <QStackedWidget>
-#include <QPushButton>
-#include <QAbstractButton>
-#include <QToolButton>
-#include <QFormLayout>
-#include <QComboBox>
 #include <QLineEdit>
-#include <QSizePolicy>
-#include "obs-module.h"
-#include "util/platform.h"
-#include "stream-key-input.hpp"
+#include <QPushButton>
+#include <QVBoxLayout>
 
-// Reset output values, e.g. when user hits the back button
-void OutputDialog::resetOutputs()
+#include <obs-module.h>
+
+namespace {
+
+QString vcText(const char *key)
 {
-	outputName = QString("");
-	outputServer = QString("");
-	outputKey = QString("");
+	return QString::fromUtf8(obs_module_text(key));
 }
 
-// For when we're done
-void OutputDialog::acceptOutputs()
+// Same effect as setClasses() from qt-wrappers.hpp (this module does not link
+// qt-wrappers); widgets are not polished yet, so setting the property is enough.
+void setClass(QWidget *widget, const char *classes)
 {
-	accept();
+	widget->setProperty("class", QString::fromUtf8(classes));
 }
 
-// For validating the current values and then updating the confirm button state
-void OutputDialog::validateOutputs(QPushButton *confirmButton)
-{
-
-	if (outputName.isEmpty() || otherNames.contains(outputName)) {
-		confirmButton->setEnabled(false);
-	} else if (outputServer.isEmpty()) {
-		confirmButton->setEnabled(false);
-	} else if (outputKey.isEmpty()) {
-		confirmButton->setEnabled(false);
-	} else {
-		confirmButton->setEnabled(true);
-	}
-}
-
-// Helper for generating info QLabels
-QLabel *generateInfoLabel(std::string text)
+QLabel *makeErrorLabel()
 {
 	auto label = new QLabel;
-	label->setTextFormat(Qt::RichText);
-	label->setOpenExternalLinks(true);
-	label->setText(QString::fromUtf8(obs_module_text(text.c_str())));
+	setClass(label, "vc-caption");
+	label->setStyleSheet(QStringLiteral("color: #F0303A;"));
 	label->setWordWrap(true);
-	label->setAlignment(Qt::AlignTop);
-
+	label->setVisible(false);
 	return label;
 }
 
-// Helper for generating form QLabels
-QLabel *generateFormLabel(std::string text)
+void setError(QLabel *label, const QString &message)
 {
-	auto label = new QLabel(QString::fromUtf8(obs_module_text(text.c_str())));
-	label->setStyleSheet("font-weight: bold;");
-
-	return label;
+	label->setText(message);
+	label->setVisible(!message.isEmpty());
 }
 
-// Helper for generating output name field
-QLineEdit *OutputDialog::generateOutputNameField(std::string text, QPushButton *confirmButton, bool edit)
+bool hasValidScheme(const QString &server)
 {
-	auto field = new QLineEdit;
-	field->setText(QString::fromUtf8(obs_module_text(text.c_str())));
-	field->setStyleSheet("padding: 4px 8px;");
-
-	if (edit) { // edit mode, set field value from output value
-		field->setText(outputName);
-	}
-
-	connect(field, &QLineEdit::textEdited, [this, field, confirmButton] {
-		outputName = field->text();
-		validateOutputs(confirmButton);
-	});
-
-	return field;
-}
-
-// Helper for generating output server field
-QLineEdit *OutputDialog::generateOutputServerField(QPushButton *confirmButton, bool locked, bool edit)
-{
-	auto field = new QLineEdit;
-	field->setStyleSheet("padding: 4px 8px;");
-	field->setDisabled(locked);
-
-	if (edit) { // edit mode, set field value from output value
-		field->setText(outputServer);
-	}
-
-	if (!locked) {
-		connect(field, &QLineEdit::textEdited, [this, field, confirmButton] {
-			outputServer = field->text();
-			validateOutputs(confirmButton);
-		});
-	}
-
-	return field;
-}
-
-// Helper for generating QComboBoxes for server selection
-QComboBox *OutputDialog::generateOutputServerCombo(std::string service, QPushButton *confirmButton, bool edit)
-{
-	auto combo = new QComboBox;
-	combo->setMinimumHeight(30);
-	combo->setStyleSheet("padding: 4px 8px;");
-
-	if (service == "Twitch") {
-		auto twitch_cache = obs_module_get_config_path(obs_get_module("rtmp-services"), "twitch_ingests.json");
-		if (twitch_cache) {
-			auto json = obs_data_create_from_json_file(twitch_cache);
-			bfree(twitch_cache);
-			combo->addItem(QString::fromUtf8("Default"), QString::fromUtf8("rtmp://live.twitch.tv/app"));
-			auto ingests = obs_data_get_array(json, "ingests");
-			obs_data_array_enum(
-				ingests,
-				[](obs_data_t *ingest_data, void *param) {
-					auto c = (QComboBox *)param;
-					auto url = QString::fromUtf8(obs_data_get_string(ingest_data, "url_template"));
-					url.replace(QString::fromUtf8("/{stream_key}"), QString::fromUtf8(""));
-					c->addItem(QString::fromUtf8(obs_data_get_string(ingest_data, "name")), url);
-				},
-				combo);
-			obs_data_array_release(ingests);
-			obs_data_release(json);
+	static const char *schemes[] = {"rtmp://", "rtmps://", "srt://", "http://", "https://"};
+	for (const char *scheme : schemes) {
+		const QString prefix = QString::fromLatin1(scheme);
+		if (server.startsWith(prefix, Qt::CaseInsensitive) && server.size() > prefix.size()) {
+			return true;
 		}
 	}
-
-	auto rawOptions = getService(service);
-
-	// turn raw options into actual selectable options
-	if (rawOptions != nullptr) {
-		auto servers = obs_data_get_array(rawOptions, "servers");
-		auto totalServers = obs_data_array_count(servers);
-
-		for (size_t idx = 0; idx < totalServers; idx++) {
-			auto item = obs_data_array_item(servers, idx);
-			combo->addItem(obs_data_get_string(item, "name"), obs_data_get_string(item, "url"));
-		}
-	}
-
-	// If we're edit, look up the current value for outputServer and try to set the index
-	if (edit) {
-		auto selectionIndex = combo->findData(outputServer);
-		//		blog(LOG_WARNING, "[Multistream] edit selection %i for value %s", selectionIndex, outputServer.toStdString().c_str());
-		if (selectionIndex != -1) {
-			combo->setCurrentIndex(selectionIndex);
-		}
-	}
-
-	// Hook event up after
-	connect(combo, &QComboBox::currentIndexChanged, [this, combo, confirmButton] {
-		outputServer = combo->currentData().toString();
-		validateOutputs(confirmButton);
-	});
-
-	// Set default value for server
-	//	outputServer = combo->currentData().toString();
-
-	return combo;
+	return false;
 }
 
-// Helper for generating output key field
-QLineEdit *OutputDialog::generateOutputKeyField(QPushButton *confirmButton, bool edit)
-{
-	auto field = new StreamKeyInput;
-	field->setStyleSheet("padding: 4px 8px;");
-
-	if (edit) { // edit mode, set field value from output value
-		field->setText(outputKey);
-	}
-
-	// Immediately hide
-	field->setEchoMode(StreamKeyInput::EchoMode::Password);
-
-	// On focus, show field
-	connect(field, &StreamKeyInput::focusGained, [this, field] { field->setEchoMode(StreamKeyInput::EchoMode::Normal); });
-
-	// On blur, hide field
-	connect(field, &StreamKeyInput::focusLost, [this, field] { field->setEchoMode(StreamKeyInput::EchoMode::Password); });
-
-	connect(field, &QLineEdit::textEdited, [this, field, confirmButton] {
-		outputKey = field->text();
-		validateOutputs(confirmButton);
-	});
-
-	return field;
-}
-
-// Helper for generating wizard button layout
-QHBoxLayout *OutputDialog::generateWizardButtonLayout(QPushButton *confirmButton, QPushButton *serviceButton, bool edit)
-{
-	auto layout = new QHBoxLayout;
-	layout->setSpacing(0);
-	layout->setContentsMargins(0, 0, 0, 0);
-
-	if (!edit && serviceButton != nullptr) { // Not edit mode and we have a service (back) button
-		layout->addWidget(serviceButton, 1);
-		layout->addStretch(1);
-
-		layout->addWidget(confirmButton, 0, Qt::AlignRight);
-	} else { // edit mode, push the button to the right
-		layout->addWidget(confirmButton, 0, Qt::AlignRight);
-	}
-
-	return layout;
-}
-
-// Helper for generating QPushButtons w/ style
-QPushButton *generateButton(QString text)
-{
-	auto button = new QPushButton;
-	button->setText(text);
-	button->setStyleSheet("padding: 4px 12px;");
-	button->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-
-	return button;
-}
-
-// Helper for generating back button
-QPushButton *OutputDialog::generateBackButton()
-{
-	auto button = generateButton(QString("< Back"));
-
-	connect(button, &QPushButton::clicked, [this] {
-		stackedWidget->setCurrentIndex(0);
-		resetOutputs();
-	});
-
-	return button;
-}
-
-QToolButton *OutputDialog::selectionButton(std::string title, QIcon icon, int selectionStep)
-{
-	auto button = new QToolButton;
-
-	button->setText(QString::fromUtf8(title));
-	button->setIcon(icon);
-	button->setIconSize(QSize(32, 32));
-	button->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
-	button->setStyleSheet(
-		"min-width: 110px; max-width: 110px; min-height: 90px; max-height: 90px; padding-top: 16px; font-weight: bold;");
-
-	connect(button, &QPushButton::clicked, [this, selectionStep] { stackedWidget->setCurrentIndex(selectionStep); });
-
-	return button;
-}
-
-// Gets a service from the service array matched by name
-obs_data_t *OutputDialog::getService(std::string serviceName)
-{
-	auto total = obs_data_array_count(servicesData);
-
-	for (size_t idx = 0; idx < total; idx++) {
-		auto item = obs_data_array_item(servicesData, idx);
-		//		blog(LOG_WARNING, "[Multistream] %s", obs_data_get_string(item, "name"));
-
-		if (serviceName == obs_data_get_string(item, "name")) {
-			return item;
-		}
-	}
-
-	return nullptr;
-}
+} // namespace
 
 OutputDialog::OutputDialog(QDialog *parent, QStringList _otherNames) : QDialog(parent), otherNames(_otherNames)
 {
-	// Load the services from rtmp-services plugin
-	auto servicesPath = obs_module_get_config_path(obs_get_module("rtmp-services"), "services.json");
-	auto absolutePath = os_get_abs_path_ptr(servicesPath);
-	auto allData = obs_data_create_from_json_file(absolutePath);
-
-	servicesData = obs_data_get_array(allData, "services");
-
-	bfree(allData);
-	bfree(servicesPath);
-	bfree(absolutePath);
-
-	// Blank info
-	resetOutputs();
-
-	//
-	setModal(true);
-	setContentsMargins(0, 0, 0, 0);
-	setFixedSize(650, 400);
-
-	stackedWidget = new QStackedWidget;
-
-	stackedWidget->setStyleSheet("padding: 0px; margin: 0px;");
-
-	// Service selection page
-	stackedWidget->addWidget(WizardServicePage());
-
-	// Pages for each service
-	stackedWidget->addWidget(WizardInfoKick());
-	stackedWidget->addWidget(WizardInfoYouTube());
-	stackedWidget->addWidget(WizardInfoTwitter());
-	stackedWidget->addWidget(WizardInfoUnknown());
-	stackedWidget->addWidget(WizardInfoTwitch());
-	stackedWidget->addWidget(WizardInfoTrovo());
-	stackedWidget->addWidget(WizardInfoTikTok());
-	stackedWidget->addWidget(WizardInfoFacebook());
-
-	stackedWidget->setCurrentIndex(0);
-
-	stackedWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-	setWindowTitle(obs_module_text("NewOutputWindowTitle"));
-
-	auto stackedLayout = new QVBoxLayout;
-	stackedLayout->setContentsMargins(0, 0, 0, 0);
-	stackedLayout->addWidget(stackedWidget, 1);
-
-	setLayout(stackedLayout);
-	show();
+	buildUi(false);
 }
 
 // Edit mode
 OutputDialog::OutputDialog(QDialog *parent, QString name, QString server, QString key, QStringList _otherNames)
 	: QDialog(parent),
-	  otherNames(_otherNames)
+	  otherNames(_otherNames),
+	  outputName(name),
+	  outputServer(server),
+	  outputKey(key)
 {
+	buildUi(true);
+}
 
-	// Load the services from rtmp-services plugin
-	auto module = obs_get_module("rtmp-services");
-	auto servicesPath = module ? obs_module_get_config_path(module, "services.json") : nullptr;
-	auto absolutePath = servicesPath ? os_get_abs_path_ptr(servicesPath) : nullptr;
-	auto allData = absolutePath ? obs_data_create_from_json_file(absolutePath) : nullptr;
+OutputDialog::~OutputDialog() {}
 
-	servicesData = obs_data_get_array(allData, "services");
-
-	obs_data_release(allData);
-	bfree(servicesPath);
-	bfree(absolutePath);
-
-	// Blank info
-	resetOutputs();
-
-	// Set info from constructor
-	outputName = name;
-	outputServer = server;
-	outputKey = key;
-
-	//
+void OutputDialog::buildUi(bool edit)
+{
+	const QString title = vcText(edit ? "OutputDialog.EditTitle" : "OutputDialog.AddTitle");
+	setWindowTitle(title);
 	setModal(true);
-	setContentsMargins(0, 0, 0, 0);
-	setFixedSize(650, 400);
+	setMinimumWidth(480);
 
-	auto layout = new QVBoxLayout();
+	auto root = new QVBoxLayout(this);
+	root->setContentsMargins(16, 16, 16, 16);
+	root->setSpacing(12);
 
-	// Add the appropriate page to the layout based upon the server url
-	if (outputServer.contains(QString::fromUtf8("ingest.global-contribute.live-video.net")) ||
-	    outputServer.contains(QString::fromUtf8(".contribute.live-video.net")) ||
-	    outputServer.contains(QString::fromUtf8(".twitch.tv"))) { // twitch
-		layout->addWidget(WizardInfoTwitch(true));
-	} else if (outputServer.contains(QString::fromUtf8(".youtube.com"))) { // youtube
-		layout->addWidget(WizardInfoYouTube(true));
-	} else if (outputServer.contains(QString::fromUtf8("fa723fc1b171.global-contribute.live-video.net"))) { // kick
-		layout->addWidget(WizardInfoKick(true));
-	} else if (outputServer.contains(QString::fromUtf8(".tiktokcdn-"))) { // tiktok
-		layout->addWidget(WizardInfoTikTok(true));
-	} else if (outputServer.contains(QString::fromUtf8(".pscp.tv"))) { // twitter
-		layout->addWidget(WizardInfoTwitter(true));
-	} else if (outputServer.contains(QString::fromUtf8("livepush.trovo.live"))) { // trovo
-		layout->addWidget(WizardInfoTrovo(true));
-	} else if (outputServer.contains(QString::fromUtf8(".fbcdn.net")) ||
-		   outputServer.contains(QString::fromUtf8(".facebook.com"))) { // facebook
-		layout->addWidget(WizardInfoFacebook(true));
-	} else { // unknown
-		layout->addWidget(WizardInfoUnknown(true));
+	auto titleLabel = new QLabel(title);
+	setClass(titleLabel, "vc-title");
+	root->addWidget(titleLabel);
+
+	// Form card
+	auto card = new QFrame;
+	setClass(card, "vc-card");
+	auto form = new QVBoxLayout(card);
+	form->setContentsMargins(12, 12, 12, 12);
+	form->setSpacing(4);
+
+	auto addField = [form](const char *labelKey, QLineEdit *field, QLabel *error, bool last) {
+		auto label = new QLabel(vcText(labelKey));
+		setClass(label, "vc-label");
+		label->setBuddy(field);
+		setClass(field, "vc-input");
+		form->addWidget(label);
+		form->addWidget(field);
+		form->addWidget(error);
+		if (!last) {
+			form->addSpacing(8);
+		}
+	};
+
+	nameEdit = new QLineEdit(outputName);
+	nameEdit->setPlaceholderText(vcText("OutputDialog.NamePlaceholder"));
+	nameError = makeErrorLabel();
+	addField("OutputDialog.Name", nameEdit, nameError, false);
+
+	serverEdit = new QLineEdit(outputServer);
+	serverEdit->setPlaceholderText(vcText("OutputDialog.ServerPlaceholder"));
+	serverError = makeErrorLabel();
+	addField("OutputDialog.Server", serverEdit, serverError, false);
+
+	keyEdit = new QLineEdit(outputKey);
+	keyEdit->setPlaceholderText(vcText("OutputDialog.KeyPlaceholder"));
+	keyVisibilityAction = keyEdit->addAction(QIcon(QStringLiteral(":/vadocast-multistream/media/eye.svg")),
+						 QLineEdit::TrailingPosition);
+	keyVisibilityAction->setCheckable(true);
+	keyError = makeErrorLabel();
+	addField("OutputDialog.Key", keyEdit, keyError, true);
+	setKeyVisible(false);
+
+	form->addSpacing(8);
+	auto help = new QLabel(vcText("OutputDialog.Help"));
+	setClass(help, "vc-caption");
+	help->setWordWrap(true);
+	form->addWidget(help);
+
+	root->addWidget(card);
+	root->addStretch(1);
+
+	// Footer: actions on the right, primary action last
+	auto footer = new QHBoxLayout;
+	footer->setSpacing(8);
+	footer->addStretch(1);
+
+	auto cancelButton = new QPushButton(vcText("OutputDialog.Cancel"));
+	setClass(cancelButton, "vc-secondary");
+	cancelButton->setAutoDefault(false);
+	footer->addWidget(cancelButton);
+
+	saveButton = new QPushButton(vcText("OutputDialog.Save"));
+	setClass(saveButton, "vc-primary");
+	saveButton->setDefault(true);
+	footer->addWidget(saveButton);
+
+	root->addLayout(footer);
+
+	connect(cancelButton, &QPushButton::clicked, this, &QDialog::reject);
+	connect(saveButton, &QPushButton::clicked, this, &OutputDialog::save);
+	connect(keyVisibilityAction, &QAction::toggled, this, &OutputDialog::setKeyVisible);
+
+	connect(nameEdit, &QLineEdit::textChanged, this, [this]() {
+		nameTouched = true;
+		validate();
+	});
+	connect(serverEdit, &QLineEdit::textChanged, this, [this]() {
+		serverTouched = true;
+		validate();
+	});
+	connect(keyEdit, &QLineEdit::textChanged, this, [this]() {
+		keyTouched = true;
+		validate();
+	});
+
+	// When editing, show problems with the stored values right away.
+	nameTouched = serverTouched = keyTouched = edit;
+	validate();
+
+	nameEdit->setFocus();
+}
+
+void OutputDialog::setKeyVisible(bool visible)
+{
+	keyEdit->setEchoMode(visible ? QLineEdit::Normal : QLineEdit::Password);
+	keyVisibilityAction->setIcon(QIcon(QString::fromLatin1(visible ? ":/vadocast-multistream/media/eye-off.svg"
+								       : ":/vadocast-multistream/media/eye.svg")));
+	const QString tip = vcText(visible ? "OutputDialog.HideKey" : "OutputDialog.ShowKey");
+	keyVisibilityAction->setToolTip(tip);
+	keyVisibilityAction->setText(tip);
+}
+
+bool OutputDialog::validate()
+{
+	const QString name = nameEdit->text().trimmed();
+	const QString server = serverEdit->text().trimmed();
+	const QString key = keyEdit->text().trimmed();
+
+	QString nameMessage;
+	if (name.isEmpty()) {
+		nameMessage = vcText("OutputDialog.NameRequired");
+	} else if (otherNames.contains(name)) {
+		nameMessage = vcText("OutputDialog.NameTaken");
 	}
 
-	setLayout(layout);
-
-	setWindowTitle(obs_module_text("EditOutputWindowTitle"));
-
-	show();
-}
-
-OutputDialog::~OutputDialog()
-{
-	obs_data_array_release(servicesData);
-}
-
-QWidget *OutputDialog::WizardServicePage()
-{
-	auto page = new QWidget(this);
-	auto pageLayout = new QVBoxLayout;
-	pageLayout->setAlignment(Qt::AlignTop);
-
-	auto description = new QLabel(QString::fromUtf8(obs_module_text("NewOutputSelectService")));
-	description->setWordWrap(true);
-	description->setStyleSheet("margin-bottom: 20px;");
-	pageLayout->addWidget(description);
-
-	// layout for service selection
-	auto selectionLayout = new QVBoxLayout;
-	selectionLayout->setAlignment(Qt::AlignCenter);
-
-	auto spacerTest = new QSpacerItem(20, 45, QSizePolicy::Fixed, QSizePolicy::Fixed);
-
-	pageLayout->addSpacerItem(spacerTest);
-
-	// row 1
-	auto rowOne = new QHBoxLayout;
-
-	rowOne->addWidget(selectionButton("Twitch", platformIconTwitch, 5));
-	rowOne->addWidget(selectionButton("YouTube", platformIconYouTube, 2));
-	rowOne->addWidget(selectionButton("TikTok", platformIconTikTok, 7));
-	rowOne->addWidget(selectionButton("Facebook", platformIconFacebook, 8));
-
-	selectionLayout->addLayout(rowOne);
-
-	// row 2
-	auto rowTwo = new QHBoxLayout;
-
-	rowTwo->addWidget(selectionButton("Trovo", platformIconTrovo, 6));
-	rowTwo->addWidget(selectionButton("X (Twitter)", platformIconTwitter, 3));
-	rowTwo->addWidget(selectionButton("Kick", platformIconKick, 1));
-	rowTwo->addWidget(selectionButton(obs_module_text("OtherService"), platformIconUnknown, 4));
-
-	selectionLayout->addLayout(rowTwo);
-
-	//
-	pageLayout->addLayout(selectionLayout);
-	page->setLayout(pageLayout);
-
-	return page;
-}
-
-QWidget *OutputDialog::WizardInfoKick(bool edit)
-{
-	auto page = new QWidget(this);
-	page->setStyleSheet("padding: 0px; margin: 0px;");
-
-	// Layout
-	auto pageLayout = new QVBoxLayout;
-	pageLayout->setSpacing(12);
-
-	// Heading
-	auto title = new QLabel(QString::fromUtf8(obs_module_text(edit ? "KickServiceInfoEdit" : "KickServiceInfo")));
-	title->setWordWrap(true);
-	title->setTextFormat(Qt::RichText);
-	pageLayout->addWidget(title);
-
-	// Content
-	auto contentLayout = new QVBoxLayout;
-
-	// Confirm button - initialised here so we can set state in form input connects
-	auto confirmButton = generateButton(QString(obs_module_text(edit ? "SaveOutput" : "CreateOutput")));
-
-	// Form
-	auto formLayout = new QFormLayout;
-	formLayout->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
-	formLayout->setLabelAlignment(Qt::AlignRight | Qt::AlignTrailing | Qt::AlignVCenter);
-	formLayout->setSpacing(12);
-
-	// Output name
-	auto outputNameField = generateOutputNameField("KickOutput", confirmButton, edit);
-	formLayout->addRow(generateFormLabel("OutputName"), outputNameField);
-
-	// Server field
-	auto serverSelection = generateOutputServerField(confirmButton, true, edit);
-	serverSelection->setText("rtmps://fa723fc1b171.global-contribute.live-video.net");
-	formLayout->addRow(generateFormLabel("KickServer"), serverSelection);
-
-	// Server info
-	formLayout->addWidget(generateInfoLabel("KickServerInfo"));
-
-	// Server key
-	auto outputKeyField = generateOutputKeyField(confirmButton, edit);
-	formLayout->addRow(generateFormLabel("KickStreamKey"), outputKeyField);
-
-	// Server key info
-	formLayout->addWidget(generateInfoLabel("KickStreamKeyInfo"));
-
-	contentLayout->addLayout(formLayout);
-
-	// spacing
-	auto spacer = new QSpacerItem(1, 20, QSizePolicy::Minimum, QSizePolicy::MinimumExpanding);
-	contentLayout->addSpacerItem(spacer);
-
-	pageLayout->addLayout(contentLayout);
-
-	// back button
-	auto serviceButton = edit ? nullptr : generateBackButton();
-
-	// Controls layout
-	auto controlsLayout = generateWizardButtonLayout(confirmButton, serviceButton, edit);
-
-	// confirm button (initialised above so we can set state)
-	connect(confirmButton, &QPushButton::clicked, [this] { acceptOutputs(); });
-
-	// Hook it all together
-	pageLayout->addLayout(controlsLayout, 1);
-	page->setLayout(pageLayout);
-
-	// Defaults for when we're changed to
-	if (!edit) {
-		connect(stackedWidget, &QStackedWidget::currentChanged,
-			[this, outputNameField, serverSelection, outputKeyField, confirmButton] {
-				if (stackedWidget->currentIndex() == 1) {
-					outputName = outputNameField->text();
-					outputServer = serverSelection->text();
-					outputKey = outputKeyField->text();
-					validateOutputs(confirmButton);
-				}
-			});
+	QString serverMessage;
+	if (server.isEmpty()) {
+		serverMessage = vcText("OutputDialog.ServerRequired");
+	} else if (!hasValidScheme(server)) {
+		serverMessage = vcText("OutputDialog.ServerInvalid");
 	}
 
-	return page;
-}
-
-QWidget *OutputDialog::WizardInfoYouTube(bool edit)
-{
-	auto page = new QWidget(this);
-	page->setStyleSheet("padding: 0px; margin: 0px;");
-
-	// Layout
-	auto pageLayout = new QVBoxLayout;
-	pageLayout->setSpacing(12);
-
-	// Heading
-	auto title = new QLabel(QString::fromUtf8(obs_module_text("YouTubeServiceInfo")));
-	pageLayout->addWidget(title);
-
-	// Content
-	auto contentLayout = new QVBoxLayout;
-
-	// Confirm button - initialised here so we can set state in form input connects
-	auto confirmButton = generateButton(QString(obs_module_text(edit ? "SaveOutput" : "CreateOutput")));
-
-	// Form
-	auto formLayout = new QFormLayout;
-	formLayout->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
-	formLayout->setLabelAlignment(Qt::AlignRight | Qt::AlignTrailing | Qt::AlignVCenter);
-	formLayout->setSpacing(12);
-
-	// Output name
-	auto outputNameField = generateOutputNameField("YouTubeOutput", confirmButton, edit);
-	formLayout->addRow(generateFormLabel("OutputName"), outputNameField);
-
-	// Server selection
-	auto serverSelection = generateOutputServerCombo("YouTube - RTMPS", confirmButton, edit);
-	formLayout->addRow(generateFormLabel("YouTubeServer"), serverSelection);
-
-	// Server info
-	formLayout->addWidget(generateInfoLabel("YouTubeServerInfo"));
-
-	// Server key
-	auto outputKeyField = generateOutputKeyField(confirmButton, edit);
-	formLayout->addRow(generateFormLabel("YouTubeStreamKey"), outputKeyField);
-
-	// Server key info
-	formLayout->addWidget(generateInfoLabel("YouTubeStreamKeyInfo"));
-
-	contentLayout->addLayout(formLayout);
-
-	// spacing
-	auto spacer = new QSpacerItem(1, 20, QSizePolicy::Minimum, QSizePolicy::MinimumExpanding);
-	contentLayout->addSpacerItem(spacer);
-
-	pageLayout->addLayout(contentLayout);
-
-	// back button
-	auto serviceButton = edit ? nullptr : generateBackButton();
-
-	// Controls layout
-	auto controlsLayout = generateWizardButtonLayout(confirmButton, serviceButton, edit);
-
-	// confirm button (initialised above so we can set state)
-	connect(confirmButton, &QPushButton::clicked, [this] { acceptOutputs(); });
-
-	// Hook it all together
-	pageLayout->addLayout(controlsLayout, 1);
-	page->setLayout(pageLayout);
-
-	// Defaults for when we're changed to
-	if (!edit) {
-		connect(stackedWidget, &QStackedWidget::currentChanged,
-			[this, outputNameField, serverSelection, outputKeyField, confirmButton] {
-				if (stackedWidget->currentIndex() == 2) {
-					outputName = outputNameField->text();
-					outputServer = serverSelection->currentData().toString();
-					outputKey = outputKeyField->text();
-					validateOutputs(confirmButton);
-				}
-			});
+	QString keyMessage;
+	if (key.isEmpty()) {
+		keyMessage = vcText("OutputDialog.KeyRequired");
 	}
 
-	return page;
+	setError(nameError, nameTouched ? nameMessage : QString());
+	setError(serverError, serverTouched ? serverMessage : QString());
+	setError(keyError, keyTouched ? keyMessage : QString());
+
+	const bool valid = nameMessage.isEmpty() && serverMessage.isEmpty() && keyMessage.isEmpty();
+	saveButton->setEnabled(valid);
+	return valid;
 }
 
-QWidget *OutputDialog::WizardInfoTwitter(bool edit)
+void OutputDialog::save()
 {
-	auto page = new QWidget(this);
-	page->setStyleSheet("padding: 0px; margin: 0px;");
-
-	// Layout
-	auto pageLayout = new QVBoxLayout;
-	pageLayout->setSpacing(12);
-
-	// Heading
-	auto title = new QLabel(QString::fromUtf8(obs_module_text("TwitterServiceInfo")));
-	pageLayout->addWidget(title);
-
-	// Content
-	auto contentLayout = new QVBoxLayout;
-
-	// Confirm button - initialised here so we can set state in form input connects
-	auto confirmButton = generateButton(QString(obs_module_text(edit ? "SaveOutput" : "CreateOutput")));
-
-	// Form
-	auto formLayout = new QFormLayout;
-	formLayout->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
-	formLayout->setLabelAlignment(Qt::AlignRight | Qt::AlignTrailing | Qt::AlignVCenter);
-	formLayout->setSpacing(12);
-
-	// Output name
-	auto outputNameField = generateOutputNameField("TwitterOutput", confirmButton, edit);
-	formLayout->addRow(generateFormLabel("OutputName"), outputNameField);
-
-	// Server selection
-	auto serverSelection = generateOutputServerCombo("Twitter", confirmButton, edit);
-	formLayout->addRow(generateFormLabel("TwitterServer"), serverSelection);
-
-	// Server info
-	formLayout->addWidget(generateInfoLabel("TwitterServerInfo"));
-
-	// Server key
-	auto outputKeyField = generateOutputKeyField(confirmButton, edit);
-	formLayout->addRow(generateFormLabel("TwitterStreamKey"), outputKeyField);
-
-	// Server key info
-	formLayout->addWidget(generateInfoLabel("TwitterStreamKeyInfo"));
-
-	contentLayout->addLayout(formLayout);
-
-	// spacing
-	auto spacer = new QSpacerItem(1, 20, QSizePolicy::Minimum, QSizePolicy::MinimumExpanding);
-	contentLayout->addSpacerItem(spacer);
-
-	pageLayout->addLayout(contentLayout);
-
-	// back button
-	auto serviceButton = edit ? nullptr : generateBackButton();
-
-	// Controls layout
-	auto controlsLayout = generateWizardButtonLayout(confirmButton, serviceButton, edit);
-
-	// confirm button (initialised above so we can set state)
-	connect(confirmButton, &QPushButton::clicked, [this] { acceptOutputs(); });
-
-	// Hook it all together
-	pageLayout->addLayout(controlsLayout, 1);
-	page->setLayout(pageLayout);
-
-	// Defaults for when we're changed to
-	if (!edit) {
-		connect(stackedWidget, &QStackedWidget::currentChanged,
-			[this, outputNameField, serverSelection, outputKeyField, confirmButton] {
-				if (stackedWidget->currentIndex() == 3) {
-					outputName = outputNameField->text();
-					outputServer = serverSelection->currentData().toString();
-					outputKey = outputKeyField->text();
-					validateOutputs(confirmButton);
-				}
-			});
+	nameTouched = serverTouched = keyTouched = true;
+	if (!validate()) {
+		return;
 	}
 
-	return page;
-}
-
-QWidget *OutputDialog::WizardInfoUnknown(bool edit)
-{
-	auto page = new QWidget(this);
-	page->setStyleSheet("padding: 0px; margin: 0px;");
-
-	// Layout
-	auto pageLayout = new QVBoxLayout;
-	pageLayout->setSpacing(12);
-
-	// Heading
-	auto title = new QLabel(QString::fromUtf8(obs_module_text("CustomServiceInfo")));
-	title->setWordWrap(true);
-	title->setTextFormat(Qt::RichText);
-	pageLayout->addWidget(title);
-
-	// Content
-	auto contentLayout = new QVBoxLayout;
-
-	// Confirm button - initialised here so we can set state in form input connects
-	auto confirmButton = generateButton(QString(obs_module_text(edit ? "SaveOutput" : "CreateOutput")));
-
-	// Form
-	auto formLayout = new QFormLayout;
-	formLayout->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
-	formLayout->setLabelAlignment(Qt::AlignRight | Qt::AlignTrailing | Qt::AlignVCenter);
-	formLayout->setSpacing(12);
-
-	// Output name
-	auto outputNameField = generateOutputNameField("CustomOutput", confirmButton, edit);
-	formLayout->addRow(generateFormLabel("OutputName"), outputNameField);
-
-	// Server field
-	auto serverSelection = generateOutputServerField(confirmButton, false, edit);
-	formLayout->addRow(generateFormLabel("CustomServer"), serverSelection);
-
-	// Server info
-	formLayout->addWidget(generateInfoLabel("CustomServerInfo"));
-
-	// Server key
-	auto outputKeyField = generateOutputKeyField(confirmButton, edit);
-	formLayout->addRow(generateFormLabel("CustomStreamKey"), outputKeyField);
-
-	// Server key info
-	formLayout->addWidget(generateInfoLabel("CustomStreamKeyInfo"));
-
-	contentLayout->addLayout(formLayout);
-
-	// spacing
-	auto spacer = new QSpacerItem(1, 20, QSizePolicy::Minimum, QSizePolicy::MinimumExpanding);
-	contentLayout->addSpacerItem(spacer);
-
-	pageLayout->addLayout(contentLayout);
-
-	// back button
-	auto serviceButton = edit ? nullptr : generateBackButton();
-
-	// Controls layout
-	auto controlsLayout = generateWizardButtonLayout(confirmButton, serviceButton, edit);
-
-	// confirm button (initialised above so we can set state)
-	connect(confirmButton, &QPushButton::clicked, [this] { acceptOutputs(); });
-
-	// Hook it all together
-	pageLayout->addLayout(controlsLayout, 1);
-	page->setLayout(pageLayout);
-
-	// Defaults for when we're changed to
-	if (!edit) {
-		connect(stackedWidget, &QStackedWidget::currentChanged,
-			[this, outputNameField, serverSelection, outputKeyField, confirmButton] {
-				if (stackedWidget->currentIndex() == 4) {
-					outputName = outputNameField->text();
-					outputServer = serverSelection->text();
-					outputKey = outputKeyField->text();
-					validateOutputs(confirmButton);
-				}
-			});
-	}
-
-	return page;
-}
-
-QWidget *OutputDialog::WizardInfoTwitch(bool edit)
-{
-	auto page = new QWidget(this);
-	page->setStyleSheet("padding: 0px; margin: 0px;");
-
-	// Layout
-	auto pageLayout = new QVBoxLayout;
-	pageLayout->setSpacing(12);
-
-	// Heading
-	auto title = new QLabel(QString::fromUtf8(obs_module_text("TwitchServiceInfo")));
-	pageLayout->addWidget(title);
-
-	// Content
-	auto contentLayout = new QVBoxLayout;
-
-	// Confirm button - initialised here so we can set state in form input connects
-	auto confirmButton = generateButton(QString(obs_module_text(edit ? "SaveOutput" : "CreateOutput")));
-
-	// Form
-	auto formLayout = new QFormLayout;
-	formLayout->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
-	formLayout->setLabelAlignment(Qt::AlignRight | Qt::AlignTrailing | Qt::AlignVCenter);
-	formLayout->setSpacing(12);
-
-	// Output name
-	auto outputNameField = generateOutputNameField("TwitchOutput", confirmButton, edit);
-	formLayout->addRow(generateFormLabel("OutputName"), outputNameField);
-
-	// Server selection
-	auto serverSelection = generateOutputServerCombo("Twitch", confirmButton, edit);
-	formLayout->addRow(generateFormLabel("TwitchServer"), serverSelection);
-
-	// Server info
-	formLayout->addWidget(generateInfoLabel("TwitchServerInfo"));
-
-	// Server key
-	auto outputKeyField = generateOutputKeyField(confirmButton, edit);
-	formLayout->addRow(generateFormLabel("TwitchStreamKey"), outputKeyField);
-
-	// Server key info
-	formLayout->addWidget(generateInfoLabel("TwitchStreamKeyInfo"));
-
-	contentLayout->addLayout(formLayout);
-
-	// spacing
-	auto spacer = new QSpacerItem(1, 20, QSizePolicy::Minimum, QSizePolicy::MinimumExpanding);
-	contentLayout->addSpacerItem(spacer);
-
-	pageLayout->addLayout(contentLayout);
-
-	// back button
-	auto serviceButton = edit ? nullptr : generateBackButton();
-
-	// Controls layout
-	auto controlsLayout = generateWizardButtonLayout(confirmButton, serviceButton, edit);
-
-	// confirm button (initialised above so we can set state)
-	connect(confirmButton, &QPushButton::clicked, [this] { acceptOutputs(); });
-
-	// Hook it all together
-	pageLayout->addLayout(controlsLayout, 1);
-	page->setLayout(pageLayout);
-
-	// Defaults for when we're changed to
-	if (!edit) {
-		connect(stackedWidget, &QStackedWidget::currentChanged,
-			[this, outputNameField, serverSelection, outputKeyField, confirmButton] {
-				if (stackedWidget->currentIndex() == 5) {
-					blog(LOG_WARNING, "[Multistream] default outputname %s ",
-					     outputNameField->text().toUtf8().constData());
-					outputName = outputNameField->text();
-					outputServer = serverSelection->currentData().toString();
-					outputKey = outputKeyField->text();
-					validateOutputs(confirmButton);
-				}
-			});
-	}
-
-	return page;
-}
-
-QWidget *OutputDialog::WizardInfoTrovo(bool edit)
-{
-	auto page = new QWidget(this);
-	page->setStyleSheet("padding: 0px; margin: 0px;");
-
-	// Layout
-	auto pageLayout = new QVBoxLayout;
-	pageLayout->setSpacing(12);
-
-	// Heading
-	auto title = new QLabel(QString::fromUtf8(obs_module_text("TrovoServiceInfo")));
-	title->setWordWrap(true);
-	title->setTextFormat(Qt::RichText);
-	pageLayout->addWidget(title);
-
-	// Content
-	auto contentLayout = new QVBoxLayout;
-
-	// Confirm button - initialised here so we can set state in form input connects
-	auto confirmButton = generateButton(QString(obs_module_text(edit ? "SaveOutput" : "CreateOutput")));
-
-	// Form
-	auto formLayout = new QFormLayout;
-	formLayout->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
-	formLayout->setLabelAlignment(Qt::AlignRight | Qt::AlignTrailing | Qt::AlignVCenter);
-	formLayout->setSpacing(12);
-
-	// Output name
-	auto outputNameField = generateOutputNameField("TrovoOutput", confirmButton, edit);
-	formLayout->addRow(generateFormLabel("OutputName"), outputNameField);
-
-	// Server field
-	auto serverSelection = generateOutputServerField(confirmButton, true, edit);
-	serverSelection->setText("rtmp://livepush.trovo.live/live/");
-
-	formLayout->addRow(generateFormLabel("TrovoServer"), serverSelection);
-
-	// Server info
-	formLayout->addWidget(generateInfoLabel("TrovoServerInfo"));
-
-	// Server key
-	auto outputKeyField = generateOutputKeyField(confirmButton, edit);
-	formLayout->addRow(generateFormLabel("TrovoStreamKey"), outputKeyField);
-
-	// Server key info
-	formLayout->addWidget(generateInfoLabel("TrovoStreamKeyInfo"));
-
-	contentLayout->addLayout(formLayout);
-
-	// spacing
-	auto spacer = new QSpacerItem(1, 20, QSizePolicy::Minimum, QSizePolicy::MinimumExpanding);
-	contentLayout->addSpacerItem(spacer);
-
-	pageLayout->addLayout(contentLayout);
-
-	// back button
-	auto serviceButton = edit ? nullptr : generateBackButton();
-
-	// Controls layout
-	auto controlsLayout = generateWizardButtonLayout(confirmButton, serviceButton, edit);
-
-	// confirm button (initialised above so we can set state)
-	connect(confirmButton, &QPushButton::clicked, [this] { acceptOutputs(); });
-
-	// Hook it all together
-	pageLayout->addLayout(controlsLayout, 1);
-	page->setLayout(pageLayout);
-
-	// Defaults for when we're changed to
-	if (!edit) {
-		connect(stackedWidget, &QStackedWidget::currentChanged,
-			[this, outputNameField, serverSelection, outputKeyField, confirmButton] {
-				if (stackedWidget->currentIndex() == 6) {
-					outputName = outputNameField->text();
-					outputServer = serverSelection->text();
-					outputKey = outputKeyField->text();
-					validateOutputs(confirmButton);
-				}
-			});
-	}
-
-	return page;
-}
-
-QWidget *OutputDialog::WizardInfoTikTok(bool edit)
-{
-	auto page = new QWidget(this);
-	page->setStyleSheet("padding: 0px; margin: 0px;");
-
-	// Layout
-	auto pageLayout = new QVBoxLayout;
-	pageLayout->setSpacing(12);
-
-	// Heading
-	auto title = new QLabel(QString::fromUtf8(obs_module_text("TikTokServiceInfo")));
-	title->setWordWrap(true);
-	title->setTextFormat(Qt::RichText);
-	pageLayout->addWidget(title);
-
-	// Content
-	auto contentLayout = new QVBoxLayout;
-
-	// Confirm button - initialised here so we can set state in form input connects
-	auto confirmButton = generateButton(QString(obs_module_text(edit ? "SaveOutput" : "CreateOutput")));
-
-	// Form
-	auto formLayout = new QFormLayout;
-	formLayout->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
-	formLayout->setLabelAlignment(Qt::AlignRight | Qt::AlignTrailing | Qt::AlignVCenter);
-	formLayout->setSpacing(12);
-
-	// Output name
-	auto outputNameField = generateOutputNameField("TikTokOutput", confirmButton, edit);
-	formLayout->addRow(generateFormLabel("OutputName"), outputNameField);
-
-	// Server field
-	auto serverSelection = generateOutputServerField(confirmButton, false, edit);
-	formLayout->addRow(generateFormLabel("TikTokServer"), serverSelection);
-
-	// Server info
-	formLayout->addWidget(generateInfoLabel("TikTokServerInfo"));
-
-	// Server key
-	auto outputKeyField = generateOutputKeyField(confirmButton, edit);
-	formLayout->addRow(generateFormLabel("TikTokStreamKey"), outputKeyField);
-
-	// Server key info
-	formLayout->addWidget(generateInfoLabel("TikTokStreamKeyInfo"));
-
-	contentLayout->addLayout(formLayout);
-
-	// spacing
-	auto spacer = new QSpacerItem(1, 20, QSizePolicy::Minimum, QSizePolicy::MinimumExpanding);
-	contentLayout->addSpacerItem(spacer);
-
-	pageLayout->addLayout(contentLayout);
-
-	// back button
-	auto serviceButton = edit ? nullptr : generateBackButton();
-
-	// Controls layout
-	auto controlsLayout = generateWizardButtonLayout(confirmButton, serviceButton, edit);
-
-	// confirm button (initialised above so we can set state)
-	connect(confirmButton, &QPushButton::clicked, [this] { acceptOutputs(); });
-
-	// Hook it all together
-	pageLayout->addLayout(controlsLayout, 1);
-	page->setLayout(pageLayout);
-
-	// Defaults for when we're changed to
-	if (!edit) {
-		connect(stackedWidget, &QStackedWidget::currentChanged,
-			[this, outputNameField, serverSelection, outputKeyField, confirmButton] {
-				if (stackedWidget->currentIndex() == 7) {
-					outputName = outputNameField->text();
-					outputServer = serverSelection->text();
-					outputKey = outputKeyField->text();
-					validateOutputs(confirmButton);
-				}
-			});
-	}
-
-	return page;
-}
-
-QWidget *OutputDialog::WizardInfoFacebook(bool edit)
-{
-	auto page = new QWidget(this);
-	page->setStyleSheet("padding: 0px; margin: 0px;");
-
-	// Layout
-	auto pageLayout = new QVBoxLayout;
-	pageLayout->setSpacing(12);
-
-	// Heading
-	auto title = new QLabel(QString::fromUtf8(obs_module_text("FacebookServiceInfo")));
-	title->setWordWrap(true);
-	title->setTextFormat(Qt::RichText);
-	pageLayout->addWidget(title);
-
-	// Content
-	auto contentLayout = new QVBoxLayout;
-
-	// Confirm button - initialised here so we can set state in form input connects
-	auto confirmButton = generateButton(QString(obs_module_text(edit ? "SaveOutput" : "CreateOutput")));
-
-	// Form
-	auto formLayout = new QFormLayout;
-	formLayout->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
-	formLayout->setLabelAlignment(Qt::AlignRight | Qt::AlignTrailing | Qt::AlignVCenter);
-	formLayout->setSpacing(12);
-
-	// Output name
-	auto outputNameField = generateOutputNameField("FacebookOutput", confirmButton, edit);
-	formLayout->addRow(generateFormLabel("OutputName"), outputNameField);
-
-	// Server field
-	auto serverSelection = generateOutputServerField(confirmButton, false, edit);
-	if (!edit)
-		serverSelection->setText("rtmps://rtmp-api.facebook.com:443/rtmp/");
-
-	formLayout->addRow(generateFormLabel("FacebookServer"), serverSelection);
-
-	// Server info
-	formLayout->addWidget(generateInfoLabel("FacebookServerInfo"));
-
-	// Server key
-	auto outputKeyField = generateOutputKeyField(confirmButton, edit);
-	formLayout->addRow(generateFormLabel("FacebookStreamKey"), outputKeyField);
-
-	// Server key info
-	formLayout->addWidget(generateInfoLabel("FacebookStreamKeyInfo"));
-
-	contentLayout->addLayout(formLayout);
-
-	// spacing
-	auto spacer = new QSpacerItem(1, 20, QSizePolicy::Minimum, QSizePolicy::MinimumExpanding);
-	contentLayout->addSpacerItem(spacer);
-
-	pageLayout->addLayout(contentLayout);
-
-	// back button
-	auto serviceButton = edit ? nullptr : generateBackButton();
-
-	// Controls layout
-	auto controlsLayout = generateWizardButtonLayout(confirmButton, serviceButton, edit);
-
-	// confirm button (initialised above so we can set state)
-	connect(confirmButton, &QPushButton::clicked, [this] { acceptOutputs(); });
-
-	// Hook it all together
-	pageLayout->addLayout(controlsLayout, 1);
-	page->setLayout(pageLayout);
-
-	// Defaults for when we're changed to
-	if (!edit) {
-		connect(stackedWidget, &QStackedWidget::currentChanged,
-			[this, outputNameField, serverSelection, outputKeyField, confirmButton] {
-				if (stackedWidget->currentIndex() == 8) {
-					outputName = outputNameField->text();
-					outputServer = serverSelection->text();
-					outputKey = outputKeyField->text();
-					validateOutputs(confirmButton);
-				}
-			});
-	}
-
-	return page;
+	outputName = nameEdit->text().trimmed();
+	outputServer = serverEdit->text().trimmed();
+	outputKey = keyEdit->text().trimmed();
+	accept();
 }

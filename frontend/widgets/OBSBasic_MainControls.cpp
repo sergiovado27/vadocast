@@ -36,6 +36,8 @@
 #endif
 #include <dialogs/OBSRemux.hpp>
 #include <settings/OBSBasicSettings.hpp>
+#include <settings/VadocastSettings.hpp>
+#include <dialogs/VadocastAddSource.hpp>
 #ifdef _WIN32
 #include <utility/AutoUpdateThread.hpp>
 #endif
@@ -87,6 +89,12 @@ void OBSBasic::CreateInteractionWindow(obs_source_t *source)
 
 void OBSBasic::CreatePropertiesWindow(obs_source_t *source)
 {
+	/* vadocast: sources open the same simple panel used to add them. */
+	if (source && obs_source_get_type(source) == OBS_SOURCE_TYPE_INPUT) {
+		VadocastShowSourceSettings(this, source);
+		return;
+	}
+
 	bool closed = true;
 	if (properties) {
 		closed = properties->close();
@@ -199,13 +207,24 @@ void OBSBasic::on_actionRemux_triggered()
 
 void OBSBasic::on_action_Settings_triggered()
 {
+	VadocastOpenSettings(VadocastSettings::Video);
+}
+
+void OBSBasic::VadocastOpenAudioSettings()
+{
+	VadocastOpenSettings(VadocastSettings::Audio);
+}
+
+/* vadocast: one simple settings panel replaces OBS' settings window. */
+void OBSBasic::VadocastOpenSettings(int section)
+{
 	static bool settings_already_executing = false;
 
 	/* Do not load settings window if inside of a temporary event loop
 	 * because we could be inside of an Auth::LoadUI call.  Keep trying
 	 * once per second until we've exit any known sub-loops. */
 	if (os_atomic_load_long(&insideEventLoop) != 0) {
-		QTimer::singleShot(1000, this, &OBSBasic::on_action_Settings_triggered);
+		QTimer::singleShot(1000, this, [this, section] { VadocastOpenSettings(section); });
 		return;
 	}
 
@@ -216,7 +235,8 @@ void OBSBasic::on_action_Settings_triggered()
 	settings_already_executing = true;
 
 	{
-		OBSBasicSettings settings(this);
+		VadocastSettings settings(this);
+		settings.setSection(static_cast<VadocastSettings::Section>(section));
 		settings.exec();
 	}
 

@@ -12,4 +12,6 @@ target_sources(
     settings/OBSHotkeyLabel.hpp
     settings/OBSHotkeyWidget.cpp
     settings/OBSHotkeyWidget.hpp
+    settings/VadocastSettings.cpp
+    settings/VadocastSettings.hpp
 )
