@@ -5,6 +5,13 @@ include_guard(GLOBAL)
 set(_obs_version ${_obs_default_version})
 set(_obs_version_canonical ${_obs_default_version})
 
+# vadocast: the repository does not carry OBS' version tags, so `git describe` cannot
+# produce a version. Pin the OBS Studio version vadocast is based on. This also covers
+# the 32-bit helper build (graphics hook), which is configured without the presets.
+if(NOT DEFINED OBS_VERSION_OVERRIDE)
+  set(OBS_VERSION_OVERRIDE "32.2.2")
+endif()
+
 # Attempt to automatically discover expected OBS version
 if(NOT DEFINED OBS_VERSION_OVERRIDE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
   execute_process(
