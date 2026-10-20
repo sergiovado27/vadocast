@@ -95,6 +95,14 @@ add_obs_plugin(obs-webrtc)
 
 # vadocast: the obs-websocket remote-control server is not built (submodule kept untouched).
 # check_obs_websocket()
+# obs-browser still links the header-only websocket API (it only talks to the server
+# if it is loaded), so provide that interface target on its own.
+if(NOT TARGET OBS::websocket-api)
+  add_library(obs-websocket-api INTERFACE)
+  add_library(OBS::websocket-api ALIAS obs-websocket-api)
+  target_include_directories(obs-websocket-api INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/obs-websocket/lib")
+  target_link_libraries(obs-websocket-api INTERFACE OBS::libobs)
+endif()
 
 add_obs_plugin(obs-x264)
 add_obs_plugin(oss-audio PLATFORMS FREEBSD OPENBSD)
